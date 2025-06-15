@@ -2,13 +2,14 @@ import os
 import uuid
 import asyncio
 import time
-from fastapi import FastAPI, Depends, HTTPException, File, UploadFile
+from fastapi import FastAPI, Depends, HTTPException, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from dotenv import load_dotenv
 import boto3
 from botocore.exceptions import NoCredentialsError, PartialCredentialsError, ClientError
-from typing import Optional
+from typing import Optional, Dict, Any
+from urllib.parse import quote
 import crud, models, schemas
 from database import SessionLocal, engine, get_db
 from io import BytesIO
@@ -18,6 +19,7 @@ import json
 # AI Service SDKs
 from elevenlabs.client import ElevenLabs
 from openai import OpenAI
+from s3_service import s3_service
 
 # Load environment variables
 load_dotenv()
@@ -42,6 +44,9 @@ app = FastAPI(
     description="Backend API for AI awareness education platform",
     version="1.0.0"
 )
+
+# Progress tracking storage
+progress_tracking: Dict[str, Dict[str, Any]] = {}
 
 # CORS configuration
 CORS_ORIGINS = [
@@ -178,38 +183,13 @@ async def get_akool_token():
         print(f"❌ Error getting Akool token: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to authenticate with Akool: {str(e)}")
 
-# Helper function for S3 upload
+# Helper function for S3 upload (using consolidated S3 service)
 async def upload_to_s3(file: UploadFile, bucket_name: str, object_name: Optional[str] = None) -> str:
-    if not s3_client:
-        raise HTTPException(status_code=500, detail="S3 client not initialized. Check server logs and .env configuration.")
+    file_data = await file.read()
+    filename = object_name.split('/')[-1] if object_name else None
+    folder = object_name.split('/')[0] if object_name and '/' in object_name else 'user_uploads'
     
-    if object_name is None:
-        file_extension = file.filename.split('.')[-1] if '.' in file.filename else 'png'
-        object_name = f"user_uploads/{uuid.uuid4()}.{file_extension}"
-
-    try:
-        s3_client.upload_fileobj(
-            file.file, 
-            bucket_name, 
-            object_name, 
-            ExtraArgs={'ACL': 'public-read', 'ContentType': file.content_type}
-        )
-        # Construct the public URL
-        public_url = f"https://{bucket_name}.s3.{AWS_REGION}.amazonaws.com/{object_name}"
-        print(f"File uploaded to S3: {public_url}")
-        return public_url
-    except NoCredentialsError:
-        print("S3 Upload Error: AWS credentials not found.")
-        raise HTTPException(status_code=500, detail="S3 configuration error: Credentials not found.")
-    except PartialCredentialsError:
-        print("S3 Upload Error: Incomplete AWS credentials.")
-        raise HTTPException(status_code=500, detail="S3 configuration error: Incomplete credentials.")
-    except ClientError as e:
-        print(f"S3 ClientError during upload: {e}")
-        raise HTTPException(status_code=500, detail=f"S3 upload failed: {e.response.get('Error',{}).get('Message', str(e))}")
-    except Exception as e:
-        print(f"An unexpected error occurred during S3 upload: {e}")
-        raise HTTPException(status_code=500, detail=f"S3 upload failed: {str(e)}")
+    return s3_service.upload_file(file_data, file.content_type, folder, filename)
 
 @app.get("/")
 async def read_root():
@@ -219,6 +199,25 @@ async def read_root():
         "version": "1.0.0",
         "akool_auth": "client_credentials" if AKOOL_CLIENT_ID else ("direct_token" if AKOOL_API_KEY else "not_configured")
     }
+
+# Progress tracking endpoints
+@app.get("/api/progress/{task_id}")
+async def get_progress(task_id: str):
+    """Get progress for a specific task"""
+    if task_id not in progress_tracking:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return progress_tracking[task_id]
+
+@app.post("/api/progress/{task_id}")
+async def update_progress(task_id: str, progress: int, message: str = "", completed: bool = False):
+    """Update progress for a specific task"""
+    progress_tracking[task_id] = {
+        "progress": progress,
+        "message": message,
+        "completed": completed,
+        "timestamp": time.time()
+    }
+    return {"success": True}
 
 @app.get("/api/akool-token-test")
 async def test_akool_token():
@@ -250,63 +249,17 @@ def create_quiz_answer(quiz_answer: schemas.QuizAnswerCreate, db: Session = Depe
     # You might want to verify the user_id exists first
     return crud.create_user_quiz_answer(db=db, quiz_answer=quiz_answer)
 
-@app.post("/api/user-image")
-async def upload_user_image(file: UploadFile = File(...)):
-    """Upload user image to S3 and return the public URL"""
-    if not s3_client:
-        raise HTTPException(status_code=500, detail="S3 client not initialized.")
-    
-    # Validate file type
-    if not file.content_type.startswith('image/'):
-        raise HTTPException(status_code=400, detail="File must be an image")
-    
-    try:
-        # Upload to S3
-        s3_url = await upload_to_s3(file, S3_BUCKET_NAME)
-        return {"imageUrl": s3_url, "filename": file.filename}
-    except Exception as e:
-        print(f"Error uploading user image: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to upload image: {str(e)}")
+@app.put("/api/users/{user_id}/progress", response_model=schemas.User)
+def update_user_progress(user_id: int, progress: schemas.UserProgressUpdate, db: Session = Depends(get_db)):
+    # Ensure the user_id in the URL matches the request body
+    progress.user_id = user_id
+    updated_user = crud.update_user_progress(db=db, progress=progress)
+    if updated_user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    return updated_user
 
-@app.post("/api/user-voice")
-async def upload_user_voice(file: UploadFile = File(...)):
-    """Process user voice recording and clone voice with ElevenLabs"""
-    
-    if not elevenlabs_client:
-        raise HTTPException(status_code=500, detail="ElevenLabs client not initialized. Check API key.")
-    
-    # Validate file type
-    if not file.content_type.startswith('audio/'):
-        raise HTTPException(status_code=400, detail="File must be an audio file")
-    
-    print(f"🎤 Voice cloning enabled - processing file: {file.filename}")
-    
-    try:
-        # Clone voice using ElevenLabs Instant Voice Cloning
-        print(f"🚀 Calling ElevenLabs IVC API to clone voice from {file.filename}")
-        
-        voice = elevenlabs_client.voices.ivc.create(
-            name=f"UserClonedVoice_{uuid.uuid4().hex[:6]}",
-            description="Voice cloned from user recording for AI awareness education.",
-            files=[file.file],
-        )
-        
-        # Extract voice ID and name from response
-        voice_id = getattr(voice, 'voice_id', None) or getattr(voice, 'id', None)
-        voice_name = getattr(voice, 'name', None) or f"UserClonedVoice_{uuid.uuid4().hex[:6]}"
-        
-        print(f"✅ Voice cloning successful! Voice ID: {voice_id}, Name: {voice_name}")
-        
-        return {"voiceId": voice_id, "voice_name": voice_name, "status": "success"}
-        
-    except Exception as e:
-        print(f"❌ Error cloning voice with ElevenLabs: {e}")
-        error_detail = str(e)
-        if hasattr(e, 'body') and isinstance(e.body, dict) and 'detail' in e.body:
-            error_detail = e.body['detail']
-        raise HTTPException(status_code=500, detail=f"Failed to clone voice: {error_detail}")
 
-# User Info endpoint with correct response format
+# User Info endpoint with correct response format (kept for backward compatibility)
 @app.post("/api/user-info")
 async def save_user_info(user: schemas.UserCreate, db: Session = Depends(get_db)):
     """Save user information and return success status with user ID"""
@@ -316,6 +269,95 @@ async def save_user_info(user: schemas.UserCreate, db: Session = Depends(get_db)
     except Exception as e:
         print(f"Error saving user info: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to save user info: {str(e)}")
+
+# Complete onboarding endpoint - handles everything in one atomic operation
+@app.post("/api/complete-onboarding")
+async def complete_onboarding(
+    name: str = Form(...),
+    age: int = Form(...),
+    gender: str = Form(...),
+    image: UploadFile = File(...),
+    voice: UploadFile = File(...),
+    db: Session = Depends(get_db)
+):
+    """Complete user onboarding: save user info, upload image, clone voice - all in one atomic operation"""
+    
+    print(f"\n🚀 STARTING: Complete onboarding for {name}")
+    print(f"  - Age: {age}, Gender: {gender}")
+    print(f"  - Image: {image.filename} ({image.content_type})")
+    print(f"  - Voice: {voice.filename} ({voice.content_type})")
+    
+    # Validate inputs
+    if not image.content_type.startswith('image/'):
+        raise HTTPException(status_code=400, detail="Image file must be an image")
+    if not voice.content_type.startswith('audio/'):
+        raise HTTPException(status_code=400, detail="Voice file must be an audio file")
+    
+    try:
+        # Step 1: Upload image to S3
+        print(f"\n📤 STEP 1: Uploading image to S3")
+        if not s3_client:
+            raise HTTPException(status_code=500, detail="S3 client not initialized")
+        
+        image_url = await upload_to_s3(image, S3_BUCKET_NAME)
+        print(f"✅ Image uploaded: {image_url}")
+        
+        # Step 2: Clone voice with ElevenLabs
+        print(f"\n🎤 STEP 2: Cloning voice with ElevenLabs")
+        if not elevenlabs_client:
+            raise HTTPException(status_code=500, detail="ElevenLabs client not initialized")
+        
+        # Reset file pointer for voice cloning
+        voice.file.seek(0)
+        voice_clone_result = elevenlabs_client.voices.ivc.create(
+            name=f"UserClonedVoice_{uuid.uuid4().hex[:6]}",
+            description="Voice cloned from user recording for AI awareness education.",
+            files=[voice.file],
+        )
+        
+        voice_id = getattr(voice_clone_result, 'voice_id', None) or getattr(voice_clone_result, 'id', None)
+        voice_name = getattr(voice_clone_result, 'name', None) or f"UserClonedVoice_{uuid.uuid4().hex[:6]}"
+        
+        if not voice_id:
+            raise HTTPException(status_code=500, detail="Failed to get voice ID from ElevenLabs")
+        
+        print(f"✅ Voice cloned: {voice_id} ({voice_name})")
+        
+        # Step 3: Create complete user record
+        print(f"\n💾 STEP 3: Creating user record with all data")
+        user_data = schemas.UserCreate(name=name, age=age, gender=gender)
+        db_user = crud.create_user(
+            db=db,
+            user=user_data,
+            image_url=image_url,
+            voice_id=voice_id
+        )
+        
+        print(f"✅ User created: ID {db_user.id}")
+        print(f"🎉 COMPLETE: Onboarding finished successfully for {name}")
+        
+        return {
+            "success": True,
+            "userId": str(db_user.id),
+            "user": {
+                "id": db_user.id,
+                "name": db_user.name,
+                "age": db_user.age,
+                "gender": db_user.gender,
+                "image_url": db_user.image_url,
+                "voice_id": db_user.voice_id
+            },
+            "imageUrl": image_url,
+            "voiceId": voice_id,
+            "voiceName": voice_name
+        }
+        
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
+        raise
+    except Exception as e:
+        print(f"❌ Error in complete onboarding: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to complete onboarding: {str(e)}")
 
 # AI Service endpoints
 @app.post("/api/generate-narration")
@@ -348,31 +390,17 @@ async def generate_narration(request: dict):
             model_id="eleven_multilingual_v2"
         )
         
-        # Save audio to S3
+        # Return audio data directly as base64 for immediate playback
         audio_bytes = b"".join(audio_stream)
-        audio_filename = f"narration_{uuid.uuid4().hex[:8]}.mp3"
-        
-        print(f"📤 Uploading generated audio to S3: {audio_filename}")
-        
-        # Create temporary file-like object for S3 upload
-        audio_file = BytesIO(audio_bytes)
-        audio_file.name = audio_filename
-        
-        # Upload to S3
-        object_name = f"narrations/{audio_filename}"
-        s3_client.upload_fileobj(
-            audio_file,
-            S3_BUCKET_NAME,
-            object_name,
-            ExtraArgs={'ACL': 'public-read', 'ContentType': 'audio/mpeg'}
-        )
-        
-        audio_url = f"https://{S3_BUCKET_NAME}.s3.{AWS_REGION}.amazonaws.com/{object_name}"
+        audio_base64 = base64.b64encode(audio_bytes).decode('utf-8')
         
         print(f"✅ Custom narration generated successfully!")
-        print(f"  - Audio URL: {audio_url}")
+        print(f"  - Audio size: {len(audio_bytes)} bytes")
         
-        return {"audioUrl": audio_url}
+        return {
+            "audioData": audio_base64,
+            "audioType": "audio/mpeg"
+        }
         
     except Exception as e:
         print(f"❌ Error generating narration: {e}")
@@ -570,7 +598,7 @@ async def generate_talking_photo(request: dict):
             print(f"\n" + "-"*80)
             print(f"🔄 STEP 4: Starting to poll for video status (Task ID: {task_id})")
             print(f"  - Interval: 10 seconds")
-            print(f"  - Max Attempts: 12 (2 minutes) - reduced to save credits")
+            print(f"  - Max Attempts: 24 (4 minutes) - increased for stability")
             print(f"  - Initial delay: 5 seconds to allow job initialization")
             print("-"*80)
             
@@ -578,7 +606,7 @@ async def generate_talking_photo(request: dict):
             await asyncio.sleep(5)
             
             # Polling for completion with early exit for stuck jobs
-            max_attempts = 12  # 2 minutes with 10-second intervals
+            max_attempts = 24  # 4 minutes with 10-second intervals
             consecutive_queuing = 0
             for attempt in range(max_attempts):
                 if attempt > 0:  # Skip sleep on first attempt since we already waited 5 seconds
@@ -601,30 +629,20 @@ async def generate_talking_photo(request: dict):
                         status_result = status_response.json()
                         print(f"  - Response: {status_result}")
                         
-                        # Check for different error response formats
-                        akool_code = status_result.get("code")
-                        akool_status = status_result.get("status")
-                        
-                        # Handle different error response formats from Akool
-                        if akool_status == 404:
-                            print(f"❌ ERROR: Task ID not found (404). Job may have failed immediately.")
-                            print(f"  - This could indicate:")
-                            print(f"    1. Invalid image format or corrupted file")
-                            print(f"    2. Invalid audio URL or inaccessible audio")
-                            print(f"    3. Akool internal error during job creation")
-                            print(f"  - Suggestion: Check if both image and audio URLs are publicly accessible")
-                            raise HTTPException(status_code=404, detail=f"Akool job not found: {status_result.get('msg', 'Task ID invalid or job failed')}")
-                        
-                        if akool_code != 1000 and akool_code is not None:
-                            print(f"❌ ERROR: Akool status API returned error code: {akool_code} - {status_result.get('msg')}")
-                            if akool_code == 1102:
-                                print("  - This indicates authorization error. Check API key validity.")
-                                raise HTTPException(status_code=401, detail=f"Akool authorization failed: {status_result.get('msg')}")
-                            else:
-                                raise HTTPException(status_code=500, detail=f"Akool API error: {status_result.get('msg')}")
-                        
+                        # Handle cases where Akool returns a non-1000 code in a 200 OK response
+                        if status_result.get("code") != 1000:
+                            print(f"  - Akool returned non-success code {status_result.get('code')}: {status_result.get('msg')}")
+                            # This could mean the job is still processing, not necessarily a final error.
+                            # We'll rely on the video_status field.
+                            pass
+
                         status_data = status_result.get("data", {})
-                        video_status = status_data.get("video_status", 1)
+                        if not status_data:
+                            print("  - Status: Job still initializing or in queue...")
+                            continue
+
+                        video_status = status_data.get("video_status")
+
                     except json.JSONDecodeError:
                         print(f"  - Invalid JSON response: {status_response.text}")
                         continue
@@ -632,105 +650,62 @@ async def generate_talking_photo(request: dict):
                     status_map = {1: "Queueing", 2: "Processing", 3: "Completed", 4: "Failed"}
                     print(f"  - Received Status: {video_status} ({status_map.get(video_status, 'Unknown')})")
 
-                    # Track consecutive queuing to detect stuck jobs
                     if video_status == 1:  # Queueing
                         consecutive_queuing += 1
-                        if consecutive_queuing >= 8:  # 8 consecutive queuing attempts (80 seconds)
+                        if consecutive_queuing >= 8:
                             print(f"\n⚠️  WARNING: Job stuck in queue for {consecutive_queuing * 10} seconds")
-                            print(f"   This suggests high server load or image/audio compatibility issues")
-                            print(f"   Stopping to avoid further credit consumption")
-                            raise HTTPException(status_code=503, detail=f"Akool server overloaded - job stuck in queue after {consecutive_queuing * 10} seconds")
+                            raise HTTPException(status_code=503, detail="Akool server overloaded - job stuck in queue")
                     else:
-                        consecutive_queuing = 0  # Reset counter when status changes
+                        consecutive_queuing = 0
 
                     if video_status == 3:  # Completed
                         print("\n" + "-"*80)
                         print("✅ STEP 5: Video generation completed!")
-                        akool_video_url = status_data.get("video", "")
+                        akool_video_url = status_data.get("video", "") # Per docs, URL is in 'video'
                         print(f"  - Akool Video URL: {akool_video_url}")
 
                         if not akool_video_url:
-                            print("❌ ERROR: Akool response missing video URL despite completion status.")
-                            raise HTTPException(status_code=500, detail="Akool video URL not found in response")
+                            raise HTTPException(status_code=500, detail="Akool response missing video URL")
                         
                         print("\n" + "-"*80)
                         print("📥 STEP 6: Downloading video from Akool and uploading to our S3")
-                        print(f"  - Akool Video URL: {akool_video_url}")
                         
-                        # Download video from Akool with proper headers
-                        video_headers = {
-                            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                            "Accept": "video/mp4,video/*,*/*",
-                            "Referer": "https://openapi.akool.com/"
-                        }
-                        
-                        video_response = await client.get(
-                            akool_video_url, 
-                            headers=video_headers,
-                            timeout=120.0,
-                            follow_redirects=True
-                        )
+                        video_response = await client.get(akool_video_url, timeout=120.0, follow_redirects=True)
                         video_response.raise_for_status()
                         
-                        print(f"  - Downloaded video size: {len(video_response.content)} bytes")
-                        print(f"  - Content type: {video_response.headers.get('content-type', 'unknown')}")
-                        
                         video_file = BytesIO(video_response.content)
-                        # Create unique video filename with user name and timestamp
                         video_filename = f"talking_photo_{safe_user_name}_{timestamp}_{uuid.uuid4().hex[:6]}.mp4"
                         video_object_name = f"talking_photos/{safe_user_name}/{video_filename}"
                         
                         s3_client.upload_fileobj(
                             video_file, S3_BUCKET_NAME, video_object_name,
-                            ExtraArgs={
-                                'ACL': 'public-read', 
-                                'ContentType': 'video/mp4',
-                                'CacheControl': 'max-age=31536000',  # 1 year cache
-                                'ContentDisposition': 'inline',
-                                'Metadata': {
-                                    'user-name': safe_user_name,
-                                    'generated-timestamp': str(timestamp),
-                                    'source': 'akool-talking-photo'
-                                }
-                            }
+                            ExtraArgs={'ACL': 'public-read', 'ContentType': 'video/mp4'}
                         )
                         
-                        print(f"  - S3 upload complete with metadata")
-                        
-                        # Use direct S3 URL for development to avoid CORS issues
-                        # In production, configure CloudFront CORS and use CDN
                         s3_direct_url = f"https://{S3_BUCKET_NAME}.s3.{AWS_REGION}.amazonaws.com/{video_object_name}"
-                        encoded_video_object = quote(video_object_name, safe='/')
-                        cloudfront_url = f"https://{CLOUDFRONT_DOMAIN}/{encoded_video_object}"
-                        
-                        # Use S3 direct URL for now to avoid CORS issues in development
-                        final_video_url = s3_direct_url
                         
                         print(f"  - Uploaded to S3: {video_object_name}")
-                        print(f"  - S3 Direct URL: {s3_direct_url}")
-                        print(f"  - CDN URL (for production): {cloudfront_url}")
-                        print(f"  - Using: {final_video_url}")
+                        print(f"  - Final URL: {s3_direct_url}")
                         print("-"*80)
 
                         print("\n" + "="*80)
                         print("🎉 SUCCESS: Talking Photo generation complete.")
                         print("="*80)
 
-                        return {"videoUrl": final_video_url}
+                        return {"videoUrl": s3_direct_url}
                         
                     elif video_status == 4:  # Failed
-                        print("❌ ERROR: Akool reported video generation failed.")
-                        raise HTTPException(status_code=500, detail="Akool video generation failed")
+                        error_message = status_data.get("error_msg", "Akool video generation failed")
+                        print(f"❌ ERROR: {error_message}")
+                        raise HTTPException(status_code=500, detail=error_message)
                 else:
                     print(f"  - Received non-200 status on poll: {status_response.status_code} - {status_response.text}")
             
             print("\n" + "!"*80)
-            print("⏰ TIMEOUT: Akool video generation timed out after 2 minutes.")
+            print("⏰ TIMEOUT: Akool video generation timed out after 4 minutes.")
             print("💡 SUGGESTIONS:")
-            print("   1. Akool servers may be overloaded - try again later")
-            print("   2. Check image format (PNG/JPG) and size (<10MB)")
-            print("   3. Verify audio file format and duration")
-            print(f"   4. Manual check: https://openapi.akool.com/api/open/v3/content/video/{task_id}")
+            print("   1. Akool servers may be overloaded - try again later.")
+            print(f"   2. Manual check: https://openapi.akool.com/api/open/v3/content/video/infobymodelid?video_model_id={task_id}")
             print("!"*80)
             raise HTTPException(status_code=504, detail=f"Akool video generation timed out. Task ID: {task_id}")
             
@@ -851,7 +826,7 @@ This analysis will be used to create a stylized black and white caricature suita
 
 # Removed broken Responses API function - using DALL-E 3 directly
 
-async def generate_caricature_with_dalle3(features_description: str, prompt_details: str) -> str:
+async def generate_caricature_with_dalle3(features_description: str, prompt_details: str, task_id: str = None) -> str:
     """Generate personalized caricature using DALL-E 3 with detailed features"""
     print("\n" + "="*80)
     print("🎨 STARTING: Generate Caricature with DALL-E 3")
@@ -902,6 +877,11 @@ Requirements: Respectful exaggeration of key features, friendly expression, gend
         print("📥 Downloading image from DALL-E and uploading to S3")
         import httpx
         async with httpx.AsyncClient(timeout=60.0) as client:
+            # Update progress: Downloading generated image
+            if task_id:
+                progress_tracking[task_id]["progress"] = 70
+                progress_tracking[task_id]["message"] = "Downloading generated image..."
+            
             try:
                 image_response = await client.get(generated_image_url)
                 image_response.raise_for_status()
@@ -910,19 +890,21 @@ Requirements: Respectful exaggeration of key features, friendly expression, gend
                 print(f"❌ Failed to download image from DALL-E: {download_error}")
                 raise Exception(f"Failed to download generated image: {download_error}")
             
+            # Update progress: Uploading to S3
+            if task_id:
+                progress_tracking[task_id]["progress"] = 90
+                progress_tracking[task_id]["message"] = "Uploading to secure storage..."
+            
             try:
-                image_file = BytesIO(image_response.content)
                 image_filename = f"caricature_{uuid.uuid4().hex[:8]}.png"
-                object_name = f"caricatures/{image_filename}"
                 
-                s3_client.upload_fileobj(
-                    image_file,
-                    S3_BUCKET_NAME,
-                    object_name,
-                    ExtraArgs={'ACL': 'public-read', 'ContentType': 'image/png'}
+                # Upload using consolidated S3 service
+                caricature_url = s3_service.upload_file(
+                    image_response.content, 
+                    'image/png', 
+                    'caricatures', 
+                    image_filename
                 )
-                
-                caricature_url = f"https://{S3_BUCKET_NAME}.s3.{AWS_REGION}.amazonaws.com/{object_name}"
                 print(f"  - Uploaded to S3: {caricature_url}")
                 print("-"*80)
 
@@ -947,17 +929,46 @@ async def generate_caricature(request: dict):
     facial_features = request.get("facialFeatures", {})
     prompt_details = request.get("promptDetails", "")
     
+    # Generate task ID for progress tracking
+    task_id = f"caricature_{uuid.uuid4().hex[:8]}"
+    progress_tracking[task_id] = {
+        "progress": 0,
+        "message": "Starting caricature generation...",
+        "completed": False,
+        "timestamp": time.time()
+    }
+    
     if not openai_client:
         raise HTTPException(status_code=500, detail="OpenAI client not initialized.")
     
     try:
+        # Update progress: Starting analysis
+        progress_tracking[task_id]["progress"] = 20
+        progress_tracking[task_id]["message"] = "Analyzing facial features..."
+        
         features_description = facial_features.get("description", "")
         
+        # Update progress: Starting DALL-E generation
+        progress_tracking[task_id]["progress"] = 40
+        progress_tracking[task_id]["message"] = "Generating caricature with DALL-E 3..."
+        
         # Use DALL-E 3 directly with improved prompts
-        caricature_url = await generate_caricature_with_dalle3(features_description, prompt_details)
-        return {"caricatureUrl": caricature_url}
+        caricature_url = await generate_caricature_with_dalle3(features_description, prompt_details, task_id)
+        
+        # Final progress update
+        progress_tracking[task_id]["progress"] = 100
+        progress_tracking[task_id]["message"] = "Caricature generation completed!"
+        progress_tracking[task_id]["completed"] = True
+        progress_tracking[task_id]["caricatureUrl"] = caricature_url
+        
+        return {"caricatureUrl": caricature_url, "taskId": task_id}
         
     except Exception as e:
+        # Update progress on error
+        progress_tracking[task_id]["progress"] = -1
+        progress_tracking[task_id]["message"] = f"Error: {str(e)}"
+        progress_tracking[task_id]["completed"] = True
+        
         print(f"Error generating caricature: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to generate caricature: {str(e)}")
 
