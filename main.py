@@ -646,6 +646,7 @@ async def generate_talking_photo(request: dict):
     user_name = request.get("userName", "")
     voice_id = request.get("voiceId", "")
     audio_script = request.get("audioScript", "")  # Custom audio script for scenarios
+    scenario_type = request.get("scenarioType", "default")  # For different sample videos
     
     print("\n" + "="*80)
     print("🎬 STARTING: Generate Talking Photo")
@@ -777,63 +778,90 @@ async def generate_talking_photo(request: dict):
         print(f"  - Payload: {json.dumps(akool_payload, indent=2)}")
         print("-"*80)
         
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            akool_response = await client.post(
-                "https://openapi.akool.com/api/open/v3/content/video/createbytalkingphoto",
-                headers=akool_headers,
-                json=akool_payload
-            )
-            
-            print("\n" + "-"*80)
-            print("📬 STEP 3: Received response from Akool creation API")
-            print(f"  - Status Code: {akool_response.status_code}")
-            try:
-                akool_result = akool_response.json()
-                print(f"  - Response Body: {json.dumps(akool_result, indent=2)}")
-            except json.JSONDecodeError:
-                akool_result = {}
-                print(f"  - Response Body (non-JSON): {akool_response.text}")
-            print("-"*80)
-
-            if akool_response.status_code != 200:
-                print(f"❌ ERROR: Akool API returned non-200 status: {akool_response.status_code}")
-                raise HTTPException(status_code=500, detail=f"Akool API error: {akool_response.status_code} - {akool_response.text}")
-
-            if akool_result.get("code") != 1000:
-                print(f"❌ ERROR: Akool API returned business error code: {akool_result.get('code')}")
-                raise HTTPException(status_code=500, detail=f"Akool API failed: {akool_result.get('msg', 'Unknown error')}")
-
-            task_data = akool_result.get("data", {})
-            task_id = task_data.get("_id") or task_data.get("video_id")
-            if not task_id:
-                print("❌ ERROR: Akool API response did not contain a task ID.")
-                raise HTTPException(status_code=500, detail="Akool API did not return a task ID.")
-            
-            print(f"\n" + "-"*80)
-            print(f"🔄 STEP 4: Starting to poll for video status (Task ID: {task_id})")
-            print(f"  - Interval: 10 seconds")
-            print(f"  - Max Attempts: 24 (4 minutes) - increased for stability")
-            print(f"  - Initial delay: 5 seconds to allow job initialization")
-            print("-"*80)
-            
-            # Give Akool time to initialize the job
-            await asyncio.sleep(5)
-            
-            # Polling for completion with early exit for stuck jobs
-            max_attempts = 24  # 4 minutes with 10-second intervals
-            consecutive_queuing = 0
-            for attempt in range(max_attempts):
-                if attempt > 0:  # Skip sleep on first attempt since we already waited 5 seconds
-                    await asyncio.sleep(10)
+        # Single attempt - if it fails, use scenario-specific sample video
+        sample_video_urls = {
+            "lottery": "https://deepfake-videomaking.s3.us-east-1.amazonaws.com/video-url/scenario1_sample.mp4",
+            "criminal": "https://deepfake-videomaking.s3.us-east-1.amazonaws.com/video-url/scenario1_sample.mp4", 
+            "accident_call": "https://deepfake-videomaking.s3.us-east-1.amazonaws.com/video-url/scenario2_sample.mp4",
+            "default": f"https://{CLOUDFRONT_DOMAIN}/sample/talking_photo_sample.mp4"
+        }
+        sample_video_url = sample_video_urls.get(scenario_type, sample_video_urls["default"])
+        
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                print(f"🔄 STEP 3: Calling Akool API (single attempt)")
+                akool_response = await client.post(
+                    "https://openapi.akool.com/api/open/v3/content/video/createbytalkingphoto",
+                    headers=akool_headers,
+                    json=akool_payload
+                )
                 
-                status_url = f"https://openapi.akool.com/api/open/v3/content/video/infobymodelid?video_model_id={task_id}"
-                print(f"\n[Polling - Attempt {attempt + 1}/{max_attempts}]")
-                print(f"  - Calling: GET {status_url}")
+                print("\n" + "-"*80)
+                print("📬 STEP 3: Received response from Akool creation API")
+                print(f"  - Status Code: {akool_response.status_code}")
+                try:
+                    akool_result = akool_response.json()
+                    print(f"  - Response Body: {json.dumps(akool_result, indent=2)}")
+                except json.JSONDecodeError:
+                    akool_result = {}
+                    print(f"  - Response Body (non-JSON): {akool_response.text}")
+                print("-"*80)
+
+                if akool_response.status_code != 200:
+                    print(f"❌ Akool API failed (status {akool_response.status_code}), using sample video")
+                    return {
+                        "videoUrl": sample_video_url,
+                        "message": "서버 과부하로 인해 샘플 영상을 보여드립니다",
+                        "isSample": True
+                    }
+                    
+        except Exception as e:
+            print(f"❌ Akool API call failed: {e}, using sample video")
+            return {
+                "videoUrl": sample_video_url,
+                "message": "서버 과부하로 인해 샘플 영상을 보여드립니다",
+                "isSample": True
+            }
+
+        if akool_result.get("code") != 1000:
+            print(f"❌ Akool API returned business error code: {akool_result.get('code')}, using sample video")
+            return {
+                "videoUrl": sample_video_url,
+                "message": "서버 과부하로 인해 샘플 영상을 보여드립니다",
+                "isSample": True
+            }
+
+        task_data = akool_result.get("data", {})
+        task_id = task_data.get("_id") or task_data.get("video_id")
+        if not task_id:
+            print("❌ ERROR: Akool API response did not contain a task ID.")
+            raise HTTPException(status_code=500, detail="Akool API did not return a task ID.")
+            
+        print(f"\n" + "-"*80)
+        print(f"🔄 STEP 4: Starting to poll for video status (Task ID: {task_id})")
+        print(f"  - Interval: 10 seconds")
+        print(f"  - Max Attempts: 24 (4 minutes) - increased for stability")
+        print(f"  - Initial delay: 5 seconds to allow job initialization")
+        print("-"*80)
+            
+        # Give Akool time to initialize the job
+        await asyncio.sleep(5)
+            
+        # Polling for completion
+        max_attempts = 24  # 4 minutes with 10-second intervals
+        for attempt in range(max_attempts):
+            if attempt > 0:  # Skip sleep on first attempt since we already waited 5 seconds
+                await asyncio.sleep(10)
                 
-                polling_headers = {"Authorization": f"Bearer {akool_auth_token}"}
-                print(f"  - Using headers: Authorization: Bearer {akool_auth_token[:10]}...")
-                
-                status_response = await client.get(
+            status_url = f"https://openapi.akool.com/api/open/v3/content/video/infobymodelid?video_model_id={task_id}"
+            print(f"\n[Polling - Attempt {attempt + 1}/{max_attempts}]")
+            print(f"  - Calling: GET {status_url}")
+            
+            polling_headers = {"Authorization": f"Bearer {akool_auth_token}"}
+            print(f"  - Using headers: Authorization: Bearer {akool_auth_token[:10]}...")
+            
+            async with httpx.AsyncClient(timeout=30.0) as status_client:
+                status_response = await status_client.get(
                     status_url,
                     headers=polling_headers
                 )
@@ -865,12 +893,11 @@ async def generate_talking_photo(request: dict):
                     print(f"  - Received Status: {video_status} ({status_map.get(video_status, 'Unknown')})")
 
                     if video_status == 1:  # Queueing
-                        consecutive_queuing += 1
-                        if consecutive_queuing >= 8:
-                            print(f"\n⚠️  WARNING: Job stuck in queue for {consecutive_queuing * 10} seconds")
-                            raise HTTPException(status_code=503, detail="Akool server overloaded - job stuck in queue")
-                    else:
-                        consecutive_queuing = 0
+                        print("  - Status: Queueing...")
+                        continue  # Keep polling for queueing status
+                    elif video_status == 2:  # Processing
+                        print("  - Status: Processing...")
+                        continue  # Keep polling for processing status
 
                     if video_status == 3:  # Completed
                         print("\n" + "-"*80)
@@ -884,44 +911,65 @@ async def generate_talking_photo(request: dict):
                         print("\n" + "-"*80)
                         print("📥 STEP 6: Downloading video from Akool and uploading to our S3")
                         
-                        video_response = await client.get(akool_video_url, timeout=120.0, follow_redirects=True)
-                        video_response.raise_for_status()
-                        
-                        video_file = BytesIO(video_response.content)
-                        video_filename = f"talking_photo_{safe_user_name}_{timestamp}_{uuid.uuid4().hex[:6]}.mp4"
-                        video_object_name = f"talking_photos/{safe_user_name}/{video_filename}"
-                        
-                        s3_client.upload_fileobj(
-                            video_file, S3_BUCKET_NAME, video_object_name,
-                            ExtraArgs={'ACL': 'public-read', 'ContentType': 'video/mp4'}
-                        )
-                        
-                        s3_direct_url = f"https://{S3_BUCKET_NAME}.s3.{AWS_REGION}.amazonaws.com/{video_object_name}"
-                        
-                        print(f"  - Uploaded to S3: {video_object_name}")
-                        print(f"  - Final URL: {s3_direct_url}")
-                        print("-"*80)
+                        try:
+                            # Use a new client for downloading since the polling client might be closed
+                            async with httpx.AsyncClient(timeout=120.0) as download_client:
+                                video_response = await download_client.get(akool_video_url, follow_redirects=True)
+                                video_response.raise_for_status()
+                                
+                                video_file = BytesIO(video_response.content)
+                                video_filename = f"talking_photo_{safe_user_name}_{timestamp}_{uuid.uuid4().hex[:6]}.mp4"
+                                video_object_name = f"talking_photos/{safe_user_name}/{video_filename}"
+                                
+                                s3_client.upload_fileobj(
+                                    video_file, S3_BUCKET_NAME, video_object_name,
+                                    ExtraArgs={'ACL': 'public-read', 'ContentType': 'video/mp4'}
+                                )
+                                
+                                s3_direct_url = f"https://{S3_BUCKET_NAME}.s3.{AWS_REGION}.amazonaws.com/{video_object_name}"
+                                
+                                print(f"  - Uploaded to S3: {video_object_name}")
+                                print(f"  - Final URL: {s3_direct_url}")
+                                print("-"*80)
 
-                        print("\n" + "="*80)
-                        print("🎉 SUCCESS: Talking Photo generation complete.")
-                        print("="*80)
+                                print("\n" + "="*80)
+                                print("🎉 SUCCESS: Talking Photo generation complete.")
+                                print("="*80)
 
-                        return {"videoUrl": s3_direct_url}
+                                return {"videoUrl": s3_direct_url}
+                                
+                        except Exception as upload_error:
+                            print(f"❌ S3 upload failed: {upload_error}")
+                            print("💡 Using Akool URL directly as fallback")
+                            
+                            print("\n" + "="*80)
+                            print("🎉 SUCCESS: Using Akool video URL directly.")
+                            print("="*80)
+                            
+                            return {"videoUrl": akool_video_url}
                         
                     elif video_status == 4:  # Failed
                         error_message = status_data.get("error_msg", "Akool video generation failed")
-                        print(f"❌ ERROR: {error_message}")
-                        raise HTTPException(status_code=500, detail=error_message)
+                        print(f"❌ ERROR: {error_message}, using sample video")
+                        return {
+                            "videoUrl": sample_video_url,
+                            "message": "서버 과부하로 인해 샘플 영상을 보여드립니다",
+                            "isSample": True
+                        }
                 else:
                     print(f"  - Received non-200 status on poll: {status_response.status_code} - {status_response.text}")
-            
-            print("\n" + "!"*80)
-            print("⏰ TIMEOUT: Akool video generation timed out after 4 minutes.")
-            print("💡 SUGGESTIONS:")
-            print("   1. Akool servers may be overloaded - try again later.")
-            print(f"   2. Manual check: https://openapi.akool.com/api/open/v3/content/video/infobymodelid?video_model_id={task_id}")
-            print("!"*80)
-            raise HTTPException(status_code=504, detail=f"Akool video generation timed out. Task ID: {task_id}")
+        
+        # This timeout logic should only run AFTER the for loop completes (all 24 attempts exhausted)
+        print("\n" + "!"*80)
+        print("⏰ TIMEOUT: Akool video generation timed out after 4 minutes.")
+        print("💡 Using sample video fallback due to timeout")
+        print(f"   - Task ID: {task_id}")
+        print("!"*80)
+        return {
+            "videoUrl": sample_video_url,
+            "message": "서버 과부하로 인해 샘플 영상을 보여드립니다",
+            "isSample": True
+        }
             
     except Exception as e:
         print("\n" + "!"*80)
