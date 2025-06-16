@@ -408,28 +408,235 @@ async def generate_narration(request: dict):
 
 @app.post("/api/generate-faceswap-image")
 async def generate_faceswap_image(request: dict):
-    """Generate face-swapped image using Akool API and store in S3"""
+    """Generate face-swapped image using Akool high-quality API with face detection"""
     base_image_url = request.get("baseImageUrl", "")
     user_image_url = request.get("userImageUrl", "")
     
-    if not AKOOL_API_KEY:
-        raise HTTPException(status_code=500, detail="Akool API key not configured.")
+    print("\n" + "="*80)
+    print("🔄 STARTING: Generate Face Swap Image (High Quality)")
+    print(f"  - Base Image URL: {base_image_url}")
+    print(f"  - User Image URL: {user_image_url}")
+    print("="*80)
+    
+    # Get valid Akool token
+    try:
+        akool_auth_token = await get_akool_token()
+    except Exception as e:
+        print(f"❌ ERROR: Failed to get Akool token: {e}")
+        raise HTTPException(status_code=500, detail="Akool authentication failed.")
+    
+    if not base_image_url:
+        print("❌ ERROR: Base image URL is required.")
+        raise HTTPException(status_code=400, detail="Base image URL is required.")
+        
+    if not user_image_url:
+        print("❌ ERROR: User image URL is required.")
+        raise HTTPException(status_code=400, detail="User image URL is required.")
     
     try:
-        # TODO: Implement actual Akool face swap API call
-        # For now, return success with mock result stored in S3
+        # Load face swap configuration
+        import json
+        import os
+        config_path = os.path.join(os.path.dirname(__file__), "face_swap_config.json")
+        with open(config_path, 'r', encoding='utf-8') as f:
+            config = json.load(f)
         
-        # Mock implementation - in real implementation, you'd:
-        # 1. Call Akool face swap API
-        # 2. Get the result image URL from Akool
-        # 3. Download the result and upload to your S3
-        # 4. Return your S3 URL
+        print("\n" + "-"*80)
+        print("🔍 STEP 1: Get base image face opts from config")
         
-        result_url = f"https://{S3_BUCKET_NAME}.s3.{AWS_REGION}.amazonaws.com/faceswap/mock_result_{uuid.uuid4().hex[:8]}.jpg"
-        return {"resultUrl": result_url}
+        # Find base image configuration
+        base_image_config = None
+        for key, img_config in config["base_images"].items():
+            if img_config["url"] == base_image_url:
+                base_image_config = img_config
+                print(f"  - Found config for: {key}")
+                break
+        
+        if not base_image_config:
+            print(f"❌ ERROR: Base image not found in config: {base_image_url}")
+            raise HTTPException(status_code=400, detail="Base image not configured")
+        
+        base_image_opts = base_image_config.get("opts", "")
+        if not base_image_opts:
+            print(f"❌ ERROR: Face opts not configured for base image")
+            raise HTTPException(status_code=400, detail="Face opts not configured for base image. Please run detect API first.")
+        
+        print(f"  - Base image opts: {base_image_opts}")
+        
+        print("\n" + "-"*80)
+        print("🔍 STEP 2: Detect face in user image")
+        
+        # Detect face in user image
+        import httpx
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            detect_response = await client.post(
+                "https://sg3.akool.com/detect",
+                headers={"Content-Type": "application/json"},
+                json={"image_url": user_image_url}
+            )
+            
+            print(f"  - Detect API status: {detect_response.status_code}")
+            
+            if detect_response.status_code != 200:
+                print(f"❌ ERROR: Face detection failed: {detect_response.text}")
+                raise HTTPException(status_code=500, detail="Face detection failed")
+            
+            detect_data = detect_response.json()
+            user_image_opts = detect_data.get("landmarks_str", "")
+            
+            if not user_image_opts:
+                print(f"❌ ERROR: No face detected in user image")
+                raise HTTPException(status_code=400, detail="No face detected in user image")
+            
+            print(f"  - User image opts: {user_image_opts}")
+        
+        print("\n" + "-"*80)
+        print("🎭 STEP 3: Submit high-quality face swap job")
+        
+        # Submit face swap job using high-quality API
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            akool_headers = {
+                "Authorization": f"Bearer {akool_auth_token}",
+                "Content-Type": "application/json"
+            }
+            
+            faceswap_payload = {
+                "targetImage": [{  # Original image (base)
+                    "path": base_image_url,
+                    "opts": base_image_opts
+                }],
+                "sourceImage": [{  # Replacement face (user)
+                    "path": user_image_url,
+                    "opts": user_image_opts
+                }],
+                "face_enhance": 1,  # Enable face enhancement
+                "modifyImage": base_image_url  # The image to modify
+            }
+            
+            print(f"  - Payload: {json.dumps(faceswap_payload, indent=2)}")
+            print(f"  - Making request to Akool high-quality face swap API...")
+            
+            response = await client.post(
+                "https://openapi.akool.com/api/open/v3/faceswap/highquality/specifyimage",
+                headers=akool_headers,
+                json=faceswap_payload
+            )
+            
+            print(f"  - Response status: {response.status_code}")
+            print(f"  - Response: {response.text}")
+            
+            if response.status_code != 200:
+                print(f"❌ ERROR: Akool API returned {response.status_code}")
+                raise HTTPException(status_code=500, detail=f"Akool API error: {response.status_code}")
+            
+            response_data = response.json()
+            
+            if response_data.get("code") != 1000:
+                error_msg = response_data.get("msg", "Unknown Akool error")
+                print(f"❌ ERROR: Akool API error: {error_msg}")
+                raise HTTPException(status_code=500, detail=f"Akool error: {error_msg}")
+            
+            # Check if result is immediately available or needs polling
+            data = response_data.get("data", {})
+            result_url = data.get("url")
+            job_id = data.get("job_id")
+            task_id = data.get("_id")
+            
+            if result_url:
+                print(f"✅ Face swap completed immediately! Result URL: {result_url}")
+            else:
+                print(f"⏳ Face swap job queued, job_id: {job_id}, task_id: {task_id}")
+                # For now, return an error since we need to implement polling
+                raise HTTPException(status_code=202, detail="Face swap job submitted but polling not implemented yet")
+        
+        print("\n" + "-"*80)
+        print("📁 STEP 4: Handle result URL")
+        print(f"  - Akool result URL: {result_url}")
+        
+        # Try multiple approaches to access the image
+        image_data = None
+        s3_url = None
+        
+        # Approach 1: Try downloading with various authentication methods
+        download_attempts = [
+            # Method 1: Standard headers
+            {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Accept": "image/*,*/*;q=0.8",
+                "Referer": "https://openapi.akool.com/"
+            },
+            # Method 2: With Akool authorization
+            {
+                "Authorization": f"Bearer {akool_auth_token}",
+                "User-Agent": "Akool-Client/1.0",
+                "Accept": "image/*"
+            },
+            # Method 3: Simple browser-like request
+            {
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.5",
+                "Cache-Control": "no-cache"
+            }
+        ]
+        
+        for i, headers in enumerate(download_attempts, 1):
+            try:
+                print(f"  - Attempt {i}: Trying download with method {i}")
+                async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+                    download_response = await client.get(result_url, headers=headers)
+                    print(f"    Status: {download_response.status_code}")
+                    
+                    if download_response.status_code == 200:
+                        image_data = download_response.content
+                        if len(image_data) > 0:
+                            print(f"    ✅ Successfully downloaded {len(image_data)} bytes")
+                            break
+                        else:
+                            print(f"    ⚠️ Downloaded but data is empty")
+                    else:
+                        print(f"    ❌ Failed with status {download_response.status_code}")
+                        
+            except Exception as e:
+                print(f"    ❌ Error in attempt {i}: {e}")
+                continue
+        
+        # If download failed, use the Akool URL directly
+        if not image_data or len(image_data) == 0:
+            print("⚠️ All download attempts failed. Using Akool URL directly.")
+            print(f"  - This means the image will be served from Akool's CDN")
+            s3_url = result_url  # Use Akool URL directly
+        else:
+            # Upload to our S3
+            try:
+                print(f"  - Uploading {len(image_data)} bytes to S3...")
+                
+                # Determine file extension
+                if result_url.lower().endswith('.png'):
+                    file_ext = 'png'
+                    mime_type = 'image/png'
+                else:
+                    file_ext = 'jpg'
+                    mime_type = 'image/jpeg'
+                
+                filename = f"faceswap_result_{uuid.uuid4().hex[:8]}.{file_ext}"
+                s3_url = s3_service.upload_file(image_data, mime_type, "faceswap", filename)
+                print(f"✅ Face swap image stored in S3: {s3_url}")
+                
+            except Exception as e:
+                print(f"❌ S3 upload failed: {e}")
+                print("  - Falling back to Akool URL")
+                s3_url = result_url
+        
+        print("\n" + "="*80)
+        print("🎉 Face swap generation completed!")
+        print(f"  - Final URL: {s3_url}")
+        print("="*80)
+        
+        return {"resultUrl": s3_url}
         
     except Exception as e:
-        print(f"Error generating faceswap image: {e}")
+        print(f"❌ Error generating faceswap image: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to generate faceswap image: {str(e)}")
 
 @app.post("/api/generate-talking-photo")
@@ -438,12 +645,14 @@ async def generate_talking_photo(request: dict):
     caricature_url = request.get("caricatureUrl", "")
     user_name = request.get("userName", "")
     voice_id = request.get("voiceId", "")
+    audio_script = request.get("audioScript", "")  # Custom audio script for scenarios
     
     print("\n" + "="*80)
     print("🎬 STARTING: Generate Talking Photo")
     print(f"  - Caricature URL: {caricature_url}")
     print(f"  - User Name: {user_name}")
     print(f"  - Voice ID: {voice_id}")
+    print(f"  - Audio Script: {audio_script}")
     print("="*80)
 
     # Get valid Akool token
@@ -470,8 +679,13 @@ async def generate_talking_photo(request: dict):
         raise HTTPException(status_code=500, detail="ElevenLabs client not initialized.")
     
     try:
-        # Step 1: Generate personalized Korean script
-        korean_script = f"안녕하세요, 저는 {user_name} 선생님이에요. 만나서 반가워요~"
+        # Step 1: Use custom audio script or generate default
+        if audio_script:
+            korean_script = audio_script
+            print(f"  - Using custom audio script: {korean_script}")
+        else:
+            korean_script = f"안녕하세요, 저는 {user_name} 선생님이에요. 만나서 반가워요~"
+            print(f"  - Using default script: {korean_script}")
         
         print("\n" + "-"*80)
         print("🎙️ STEP 1: Generate personalized audio with ElevenLabs")
