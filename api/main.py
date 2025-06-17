@@ -33,13 +33,33 @@ import base64
 import json
 import httpx
 
-# AI Service SDKs
-from elevenlabs.client import ElevenLabs
-from openai import OpenAI
-from s3_service import s3_service
-
-# Load environment variables
+# Load environment variables first
 load_dotenv()
+
+# AI Service SDKs
+try:
+    from elevenlabs.client import ElevenLabs
+    elevenlabs_import_available = True
+except ImportError as e:
+    print(f"⚠️ ElevenLabs import failed: {e}")
+    ElevenLabs = None
+    elevenlabs_import_available = False
+
+try:
+    from openai import OpenAI
+    openai_import_available = True
+except ImportError as e:
+    print(f"⚠️ OpenAI import failed: {e}")
+    OpenAI = None
+    openai_import_available = False
+
+try:
+    from s3_service import s3_service
+    s3_service_available = True
+except ImportError as e:
+    print(f"⚠️ S3 service import failed: {e}")
+    s3_service = None
+    s3_service_available = False
 
 # Environment variables
 S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME")
@@ -157,25 +177,25 @@ except Exception as e:
 
 # ElevenLabs Client Initialization
 elevenlabs_client = None
-if ELEVENLABS_API_KEY:
+if elevenlabs_import_available and ELEVENLABS_API_KEY:
     try:
         elevenlabs_client = ElevenLabs(api_key=ELEVENLABS_API_KEY)
-        print("ElevenLabs client initialized successfully.")
+        print("✅ ElevenLabs client initialized successfully.")
     except Exception as e:
-        print(f"Error initializing ElevenLabs client: {e}")
+        print(f"⚠️ Error initializing ElevenLabs client: {e}")
 else:
-    print("ElevenLabs client not initialized due to missing API key.")
+    print("⚠️ ElevenLabs client not initialized (import failed or missing API key)")
 
 # OpenAI Client Initialization
 openai_client = None
-if OPENAI_API_KEY:
+if openai_import_available and OPENAI_API_KEY:
     try:
         openai_client = OpenAI(api_key=OPENAI_API_KEY)
-        print("OpenAI client initialized successfully.")
+        print("✅ OpenAI client initialized successfully.")
     except Exception as e:
-        print(f"Error initializing OpenAI client: {e}")
+        print(f"⚠️ Error initializing OpenAI client: {e}")
 else:
-    print("OpenAI client not initialized due to missing API key.")
+    print("⚠️ OpenAI client not initialized (import failed or missing API key)")
 
 # Akool Token Management
 akool_token = None
@@ -244,7 +264,21 @@ async def read_root():
         "message": "AI Awareness Backend API is running",
         "status": "healthy",
         "version": "1.0.0",
-        "akool_auth": "client_credentials" if AKOOL_CLIENT_ID else ("direct_token" if AKOOL_API_KEY else "not_configured")
+        "imports": {
+            "supabase": supabase_available,
+            "elevenlabs": elevenlabs_import_available,
+            "openai": openai_import_available,
+            "s3_service": s3_service_available
+        }
+    }
+
+@app.get("/test")
+async def test_endpoint():
+    """Simple test endpoint that doesn't depend on any services"""
+    return {
+        "status": "working",
+        "message": "Backend is responding correctly",
+        "timestamp": time.time()
     }
 
 @app.get("/api/health")
