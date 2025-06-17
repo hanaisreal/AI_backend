@@ -1140,8 +1140,8 @@ async def generate_talking_photo(request: dict):
             
         print(f"\n" + "-"*80)
         print(f"🔄 STEP 4: Starting to poll for video status (Task ID: {task_id})")
-        print(f"  - Interval: 5 seconds")
-        print(f"  - Max Attempts: 60 (5 minutes) - increased for stability")
+        print(f"  - Interval: 10 seconds")
+        print(f"  - Max Attempts: 36 (6 minutes)")
         print(f"  - Initial delay: 5 seconds to allow job initialization")
         print("-"*80)
             
@@ -1149,10 +1149,10 @@ async def generate_talking_photo(request: dict):
         await asyncio.sleep(5)
             
         # Polling for completion
-        max_attempts = 60  # 5 minutes with 5-second intervals
+        max_attempts = 36  # 6 minutes with 10-second intervals
         for attempt in range(max_attempts):
             if attempt > 0:  # Skip sleep on first attempt since we already waited 5 seconds
-                await asyncio.sleep(5)
+                await asyncio.sleep(10)
                 
             status_url = f"https://openapi.akool.com/api/open/v3/content/video/infobymodelid?video_model_id={task_id}"
             print(f"\n[Polling - Attempt {attempt + 1}/{max_attempts}]")
@@ -1269,9 +1269,9 @@ async def generate_talking_photo(request: dict):
                 else:
                     print(f"  - Received non-200 status on poll: {status_response.status_code} - {status_response.text}")
         
-        # This timeout logic should only run AFTER the for loop completes (all 60 attempts exhausted)
+        # This timeout logic should only run AFTER the for loop completes (all 36 attempts exhausted)
         print("\n" + "!"*80)
-        print("⏰ TIMEOUT: Akool video generation timed out after 5 minutes.")
+        print("⏰ TIMEOUT: Akool video generation timed out after 6 minutes.")
         print("💡 Using sample video fallback due to timeout")
         print(f"   - Task ID: {task_id}")
         print("!"*80)
