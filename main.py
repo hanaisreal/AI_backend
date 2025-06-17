@@ -10,8 +10,9 @@ import boto3
 from botocore.exceptions import NoCredentialsError, PartialCredentialsError, ClientError
 from typing import Optional, Dict, Any
 from urllib.parse import quote
-import crud, models, schemas
-from database import SessionLocal, engine, get_db
+# Replace SQLAlchemy with Supabase
+from supabase_service import supabase_service
+from supabase_models import User, UserCreate, UserUpdate, QuizAnswer, QuizAnswerCreate, UserProgressUpdate
 from io import BytesIO
 import base64
 import json
@@ -38,7 +39,8 @@ AKOOL_CLIENT_SECRET = os.getenv("AKOOL_CLIENT_SECRET")
 AKOOL_API_KEY = os.getenv("AKOOL_API_KEY")  # Keep for backward compatibility
 
 
-models.Base.metadata.create_all(bind=engine)
+# Initialize Supabase tables on startup
+# Tables will be created when first accessed
 
 app = FastAPI(
     title="AI Awareness Backend API",
@@ -201,6 +203,22 @@ async def read_root():
         "akool_auth": "client_credentials" if AKOOL_CLIENT_ID else ("direct_token" if AKOOL_API_KEY else "not_configured")
     }
 
+@app.get("/api/health")
+async def health_check():
+    """Comprehensive health check for all services"""
+    return {
+        "status": "healthy",
+        "timestamp": time.time(),
+        "services": {
+            "s3": s3_client is not None,
+            "elevenlabs": elevenlabs_client is not None,
+            "openai": openai_client is not None,
+            "supabase": supabase_service.health_check()
+        },
+        "database": "supabase",
+        "version": "2.0.0"
+    }
+
 # Progress tracking endpoints
 @app.get("/api/progress/{task_id}")
 async def get_progress(task_id: str):
@@ -238,35 +256,51 @@ async def test_akool_token():
         }
 
 
-@app.get("/api/users/{user_id}", response_model=schemas.User)
-def read_user(user_id: int, db: Session = Depends(get_db)):
-    db_user = crud.get_user(db, user_id=user_id)
-    if db_user is None:
+@app.get("/api/users/{user_id}")
+def read_user(user_id: int):
+    """Get user by ID from Supabase"""
+    user = supabase_service.get_user(user_id)
+    if user is None:
         raise HTTPException(status_code=404, detail="User not found")
-    return db_user
+    return user
 
-@app.post("/api/quiz-answers", response_model=schemas.QuizAnswer)
-def create_quiz_answer(quiz_answer: schemas.QuizAnswerCreate, db: Session = Depends(get_db)):
-    # You might want to verify the user_id exists first
-    return crud.create_user_quiz_answer(db=db, quiz_answer=quiz_answer)
+@app.post("/api/quiz-answers")
+def create_quiz_answer(quiz_answer: QuizAnswerCreate):
+    """Save quiz answers to Supabase"""
+    try:
+        # Verify user exists first
+        user = supabase_service.get_user(quiz_answer.user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        result = supabase_service.save_quiz_answer(
+            quiz_answer.user_id, 
+            quiz_answer.module, 
+            quiz_answer.answers
+        )
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save quiz answer: {str(e)}")
 
-@app.put("/api/users/{user_id}/progress", response_model=schemas.User)
-def update_user_progress(user_id: int, progress: schemas.UserProgressUpdate, db: Session = Depends(get_db)):
-    # Ensure the user_id in the URL matches the request body
-    progress.user_id = user_id
-    updated_user = crud.update_user_progress(db=db, progress=progress)
-    if updated_user is None:
-        raise HTTPException(status_code=404, detail="User not found")
-    return updated_user
+@app.put("/api/users/{user_id}/progress")
+def update_user_progress(user_id: int, progress: UserProgressUpdate):
+    """Update user progress in Supabase"""
+    try:
+        updated_user = supabase_service.update_user_progress(user_id, progress.dict(exclude_unset=True))
+        if updated_user is None:
+            raise HTTPException(status_code=404, detail="User not found")
+        return updated_user
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update user progress: {str(e)}")
 
 
 # User Info endpoint with correct response format (kept for backward compatibility)
 @app.post("/api/user-info")
-async def save_user_info(user: schemas.UserCreate, db: Session = Depends(get_db)):
+async def save_user_info(user: UserCreate):
     """Save user information and return success status with user ID"""
     try:
-        db_user = crud.create_user(db=db, user=user)
-        return {"success": True, "userId": str(db_user.id)}
+        db_user = supabase_service.create_user(user.dict())
+        return {"success": True, "userId": str(db_user["id"])}
     except Exception as e:
         print(f"Error saving user info: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to save user info: {str(e)}")
@@ -278,8 +312,7 @@ async def complete_onboarding(
     age: int = Form(...),
     gender: str = Form(...),
     image: UploadFile = File(...),
-    voice: UploadFile = File(...),
-    db: Session = Depends(get_db)
+    voice: UploadFile = File(...)
 ):
     """Complete user onboarding: save user info, upload image, clone voice - all in one atomic operation"""
     
@@ -324,29 +357,30 @@ async def complete_onboarding(
         
         print(f"✅ Voice cloned: {voice_id} ({voice_name})")
         
-        # Step 3: Create complete user record
+        # Step 3: Create complete user record in Supabase
         print(f"\n💾 STEP 3: Creating user record with all data")
-        user_data = schemas.UserCreate(name=name, age=age, gender=gender)
-        db_user = crud.create_user(
-            db=db,
-            user=user_data,
-            image_url=image_url,
-            voice_id=voice_id
-        )
+        user_data = {
+            "name": name,
+            "age": age,
+            "gender": gender,
+            "image_url": image_url,
+            "voice_id": voice_id
+        }
+        db_user = supabase_service.create_user(user_data)
         
-        print(f"✅ User created: ID {db_user.id}")
+        print(f"✅ User created: ID {db_user['id']}")
         print(f"🎉 COMPLETE: Onboarding finished successfully for {name}")
         
         return {
             "success": True,
-            "userId": str(db_user.id),
+            "userId": str(db_user["id"]),
             "user": {
-                "id": db_user.id,
-                "name": db_user.name,
-                "age": db_user.age,
-                "gender": db_user.gender,
-                "image_url": db_user.image_url,
-                "voice_id": db_user.voice_id
+                "id": db_user["id"],
+                "name": db_user["name"],
+                "age": db_user["age"],
+                "gender": db_user["gender"],
+                "image_url": db_user["image_url"],
+                "voice_id": db_user["voice_id"]
             },
             "imageUrl": image_url,
             "voiceId": voice_id,
@@ -1042,20 +1076,29 @@ async def generate_talking_photo(request: dict):
                                 
                                 s3_client.upload_fileobj(
                                     video_file, S3_BUCKET_NAME, video_object_name,
-                                    ExtraArgs={'ACL': 'public-read', 'ContentType': 'video/mp4'}
+                                    ExtraArgs={
+                                        'ACL': 'public-read', 
+                                        'ContentType': 'video/mp4',
+                                        'CacheControl': 'max-age=31536000',  # Cache for 1 year
+                                        'Metadata': {
+                                            'optimized-for': 'web-delivery',
+                                            'generated-by': 'ai-awareness-platform'
+                                        }
+                                    }
                                 )
                                 
-                                s3_direct_url = f"https://{S3_BUCKET_NAME}.s3.{AWS_REGION}.amazonaws.com/{video_object_name}"
+                                # Use CloudFront CDN URL for faster delivery
+                                cloudfront_url = f"https://{CLOUDFRONT_DOMAIN}/{video_object_name}"
                                 
                                 print(f"  - Uploaded to S3: {video_object_name}")
-                                print(f"  - Final URL: {s3_direct_url}")
+                                print(f"  - CloudFront URL: {cloudfront_url}")
                                 print("-"*80)
 
                                 print("\n" + "="*80)
-                                print("🎉 SUCCESS: Talking Photo generation complete.")
+                                print("🎉 SUCCESS: Talking Photo generation complete (using CDN).")
                                 print("="*80)
 
-                                return {"videoUrl": s3_direct_url}
+                                return {"videoUrl": cloudfront_url}
                                 
                         except Exception as upload_error:
                             print(f"❌ S3 upload failed: {upload_error}")
