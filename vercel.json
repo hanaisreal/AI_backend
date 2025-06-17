@@ -14,7 +14,11 @@
   ],
   "functions": {
     "api/main.py": {
-      "runtime": "python3.9"
+      "runtime": "python3.9",
+      "includeFiles": "api/**"
     }
+  },
+  "env": {
+    "PYTHONPATH": "api"
   }
 }
