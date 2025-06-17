@@ -1,10 +1,5 @@
 {
   "version": 2,
-  "functions": {
-    "api/main.py": {
-      "maxDuration": 10
-    }
-  },
   "routes": [
     {
       "src": "/(.*)",

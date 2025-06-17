@@ -6,13 +6,12 @@ A FastAPI-based backend service that handles user data processing, AI integratio
 
 ```
 backend/
-├── api/
-│   ├── main.py                    # FastAPI application entry point
-│   ├── supabase_service.py        # Supabase client and database operations
-│   ├── supabase_models.py         # Supabase table models and schemas
-│   ├── s3_service.py              # AWS S3 operations for media storage
-│   ├── face_swap_config.json      # Face swap configuration for Akool API
-│   └── requirements.txt           # Python dependencies
+├── main.py                        # FastAPI application entry point
+├── supabase_service.py            # Supabase client and database operations
+├── supabase_models.py             # Supabase table models and schemas
+├── s3_service.py                  # AWS S3 operations for media storage
+├── face_swap_config.json          # Face swap configuration for Akool API
+├── requirements.txt               # Python dependencies
 ├── init_supabase.py               # Supabase initialization and setup
 ├── supabase_schema.sql            # Database schema for Supabase
 ├── vercel.json                    # Vercel deployment configuration
@@ -115,7 +114,7 @@ python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 
 # Install dependencies
-pip install -r api/requirements.txt
+pip install -r requirements.txt
 ```
 
 ### 2. Environment Variables
@@ -152,7 +151,7 @@ python init_supabase.py
 
 ### 4. Start Development Server
 ```bash
-uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
 
 ## 📊 Database Schema
@@ -217,7 +216,7 @@ vercel --prod
 
 ### Local Production
 ```bash
-uvicorn api.main:app --host 0.0.0.0 --port 8000 --workers 4
+uvicorn main:app --host 0.0.0.0 --port 8000 --workers 4
 ```
 
 ## 📝 API Documentation

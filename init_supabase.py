@@ -4,8 +4,6 @@ Run this script after setting up your Supabase project and environment variables
 """
 import asyncio
 import os
-import sys
-sys.path.append('api')
 from supabase_service import supabase_service
 
 def init_database():
