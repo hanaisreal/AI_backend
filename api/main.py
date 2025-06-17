@@ -51,11 +51,9 @@ app = FastAPI(
 progress_tracking: Dict[str, Dict[str, Any]] = {}
 
 # CORS configuration
-FRONTEND_URL = os.getenv("FRONTEND_URL", "https://ai-frontend-gules.vercel.app")
 CORS_ORIGINS = [
     "http://localhost:3000",
     "http://localhost:5173",
-    FRONTEND_URL,
     "https://ai-frontend-gules.vercel.app",
     "https://*.vercel.app"
 ]
