@@ -66,11 +66,19 @@ app = FastAPI(
 # Progress tracking storage
 progress_tracking: Dict[str, Dict[str, Any]] = {}
 
-# CORS configuration - Allow all origins for debugging
+# CORS configuration
+origins = [
+    "http://localhost:5173",
+    "http://localhost:3000",
+    "https://ai-awareness-project-git-main-hanaisreals-projects.vercel.app",
+    "https://ai-awareness-project.vercel.app",
+    "https://ai-frontend-gules.vercel.app",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,  # Must be False when allow_origins is ["*"]
+    allow_origins=origins,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -78,40 +86,54 @@ app.add_middleware(
 # Global exception handler to ensure CORS headers are always included
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
+    origin = request.headers.get('origin')
+    if origin in origins:
+        return JSONResponse(
+            status_code=500,
+            content={"detail": f"Internal server error: {str(exc)}"},
+            headers={
+                "Access-Control-Allow-Origin": origin,
+                "Access-Control-Allow-Credentials": "true",
+            }
+        )
     return JSONResponse(
         status_code=500,
         content={"detail": f"Internal server error: {str(exc)}"},
-        headers={
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "*",
-            "Access-Control-Allow-Headers": "*",
-        }
     )
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
+    origin = request.headers.get('origin')
+    if origin in origins:
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"detail": exc.detail},
+            headers={
+                "Access-Control-Allow-Origin": origin,
+                "Access-Control-Allow-Credentials": "true",
+            }
+        )
     return JSONResponse(
         status_code=exc.status_code,
         content={"detail": exc.detail},
-        headers={
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "*",
-            "Access-Control-Allow-Headers": "*",
-        }
     )
 
 # Add OPTIONS handler for preflight requests
 @app.options("/{full_path:path}")
-async def options_handler(full_path: str):
-    return JSONResponse(
-        content={},
-        headers={
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-            "Access-Control-Allow-Headers": "*",
-            "Access-Control-Max-Age": "86400",
-        }
-    )
+async def options_handler(request: Request, full_path: str):
+    origin = request.headers.get('origin')
+    if origin in origins:
+        return JSONResponse(
+            content={},
+            headers={
+                "Access-Control-Allow-Origin": origin,
+                "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+                "Access-Control-Allow-Headers": "Content-Type, Authorization",
+                "Access-Control-Allow-Credentials": "true",
+                "Access-Control-Max-Age": "86400",
+            }
+        )
+    return JSONResponse(content={"detail": "Forbidden"}, status_code=403)
 
 # S3 Client Initialization and CORS Configuration
 s3_client = None
