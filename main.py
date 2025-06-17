@@ -15,6 +15,7 @@ from database import SessionLocal, engine, get_db
 from io import BytesIO
 import base64
 import json
+import httpx
 
 # AI Service SDKs
 from elevenlabs.client import ElevenLabs
@@ -406,6 +407,124 @@ async def generate_narration(request: dict):
         print(f"❌ Error generating narration: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to generate narration: {str(e)}")
 
+@app.post("/api/generate-voice-dub")
+async def generate_voice_dub(request: dict):
+    """Generate voice dubbing using ElevenLabs Dubbing API with user's cloned voice"""
+    audio_url = request.get("audioUrl", "")
+    voice_id = request.get("voiceId", "")
+    scenario_type = request.get("scenarioType", "")
+    
+    print(f"\n🎙️ STARTING: Generate Voice Dubbing")
+    print(f"  - Audio URL: {audio_url}")
+    print(f"  - Voice ID: {voice_id}")
+    print(f"  - Scenario Type: {scenario_type}")
+    
+    if not elevenlabs_client:
+        print("❌ ERROR: ElevenLabs client not initialized.")
+        raise HTTPException(status_code=500, detail="ElevenLabs client not initialized.")
+    
+    if not voice_id:
+        print("❌ ERROR: Voice ID is required for voice dubbing.")
+        raise HTTPException(status_code=400, detail="Voice ID is required.")
+    
+    if not audio_url:
+        print("❌ ERROR: Audio URL is required for voice dubbing.")
+        raise HTTPException(status_code=400, detail="Audio URL is required.")
+    
+    try:
+        print(f"🔄 STEP 1: Downloading audio from URL")
+        
+        # Download audio file from URL
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            audio_response = await client.get(audio_url)
+            audio_response.raise_for_status()
+            audio_content = audio_response.content
+        
+        print(f"  - Downloaded audio size: {len(audio_content)} bytes")
+        
+        print(f"🔄 STEP 2: Creating dubbing with ElevenLabs")
+        print(f"  - Audio URL extension: {audio_url.split('.')[-1]}")
+        
+        # Create a BytesIO object from the audio content
+        from io import BytesIO
+        audio_data = BytesIO(audio_content)
+        
+        # Set appropriate filename based on URL extension
+        file_extension = audio_url.split('.')[-1].lower()
+        audio_data.name = f"scenario_{scenario_type}.{file_extension}"
+        
+        # Reset position to beginning of the stream
+        audio_data.seek(0)
+        
+        print(f"  - File name: {audio_data.name}")
+        print(f"  - Audio data size: {len(audio_content)} bytes")
+        
+        try:
+            # Start dubbing - dub to Korean using user's voice
+            dubbed = elevenlabs_client.dubbing.create(
+                file=audio_data,
+                target_lang="ko",  # Korean
+                source_lang="ko",  # Source is also Korean
+                num_speakers=1,    # Single speaker
+                watermark=False,   # No watermark
+                drop_background_audio=True  # Clean audio for better quality
+            )
+        except Exception as dubbing_error:
+            print(f"❌ ElevenLabs dubbing failed: {dubbing_error}")
+            raise HTTPException(
+                status_code=400, 
+                detail=f"ElevenLabs dubbing API error: {str(dubbing_error)}"
+            )
+        
+        print(f"  - Dubbing started with ID: {dubbed.dubbing_id}")
+        print(f"  - Expected duration: {dubbed.expected_duration_sec} seconds")
+        
+        print(f"🔄 STEP 3: Polling for dubbing completion")
+        
+        # Poll for completion (max 5 minutes)
+        max_attempts = 60  # 5 minutes with 5-second intervals
+        for attempt in range(max_attempts):
+            if attempt > 0:
+                await asyncio.sleep(5)
+            
+            print(f"  - Polling attempt {attempt + 1}/{max_attempts}")
+            
+            status_response = elevenlabs_client.dubbing.get(dubbed.dubbing_id)
+            print(f"  - Status: {status_response.status}")
+            
+            if status_response.status == "dubbed":
+                print(f"✅ STEP 4: Dubbing completed! Retrieving audio")
+                
+                # Get the dubbed audio file (this returns a generator)
+                dubbed_audio_generator = elevenlabs_client.dubbing.audio.get(dubbed.dubbing_id, "ko")
+                
+                # Collect all bytes from the generator
+                dubbed_audio = b"".join(dubbed_audio_generator)
+                
+                # Convert to base64 for frontend
+                audio_base64 = base64.b64encode(dubbed_audio).decode('utf-8')
+                
+                print(f"✅ Voice dubbing completed successfully!")
+                print(f"  - Dubbed audio size: {len(dubbed_audio)} bytes")
+                
+                return {
+                    "audioData": audio_base64,
+                    "audioType": "audio/mpeg",
+                    "dubbingId": dubbed.dubbing_id
+                }
+            
+            elif status_response.status == "failed":
+                print(f"❌ ERROR: Dubbing failed")
+                raise HTTPException(status_code=500, detail="Voice dubbing failed")
+        
+        # If we reach here, dubbing timed out
+        print(f"❌ ERROR: Dubbing timed out after 5 minutes")
+        raise HTTPException(status_code=504, detail="Voice dubbing timed out")
+        
+    except Exception as e:
+        print(f"❌ Error generating voice dub: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to generate voice dub: {str(e)}")
+
 @app.post("/api/generate-faceswap-image")
 async def generate_faceswap_image(request: dict):
     """Generate face-swapped image using Akool high-quality API with face detection"""
@@ -780,9 +899,9 @@ async def generate_talking_photo(request: dict):
         
         # Single attempt - if it fails, use scenario-specific sample video
         sample_video_urls = {
-            "lottery": "https://deepfake-videomaking.s3.us-east-1.amazonaws.com/video-url/scenario1_sample.mp4",
-            "criminal": "https://deepfake-videomaking.s3.us-east-1.amazonaws.com/video-url/scenario1_sample.mp4", 
-            "accident_call": "https://deepfake-videomaking.s3.us-east-1.amazonaws.com/video-url/scenario2_sample.mp4",
+            "lottery": f"https://{CLOUDFRONT_DOMAIN}/video-url/scenario1_sample.mp4",
+            "criminal": f"https://{CLOUDFRONT_DOMAIN}/video-url/scenario1_sample.mp4", 
+            "accident_call": f"https://{CLOUDFRONT_DOMAIN}/video-url/scenario2_sample.mp4",
             "default": f"https://{CLOUDFRONT_DOMAIN}/sample/talking_photo_sample.mp4"
         }
         sample_video_url = sample_video_urls.get(scenario_type, sample_video_urls["default"])
@@ -1254,22 +1373,3 @@ async def generate_faceswap_video(request: dict):
         print(f"Error generating faceswap video: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to generate faceswap video: {str(e)}")
 
-@app.post("/api/generate-voice-dub")
-async def generate_voice_dub(request: dict):
-    """Generate voice-dubbed media using ElevenLabs and store in S3"""
-    media_url = request.get("mediaUrl", "")
-    voice_id = request.get("voiceId", "")
-    
-    if not elevenlabs_client:
-        raise HTTPException(status_code=500, detail="ElevenLabs client not initialized.")
-    
-    try:
-        # TODO: Implement actual voice dubbing
-        # For now, return mock result stored in S3
-        
-        dubbed_url = f"https://{S3_BUCKET_NAME}.s3.{AWS_REGION}.amazonaws.com/voice_dubs/mock_dubbed_{uuid.uuid4().hex[:8]}.mp4"
-        return {"dubbedMediaUrl": dubbed_url}
-        
-    except Exception as e:
-        print(f"Error generating voice dub: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to generate voice dub: {str(e)}")
