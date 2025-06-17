@@ -10,20 +10,79 @@ from fastapi.exceptions import RequestValidationError
 from dotenv import load_dotenv
 import boto3
 from botocore.exceptions import NoCredentialsError, PartialCredentialsError, ClientError
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from urllib.parse import quote
+from pydantic import BaseModel
+
+# Define base models that will always be available (before any import attempts)
+class UserCreate(BaseModel):
+    name: str
+    age: int
+    gender: str
+    image_url: Optional[str] = None
+    voice_id: Optional[str] = None
+
+class UserUpdate(BaseModel):
+    name: Optional[str] = None
+    age: Optional[int] = None
+    gender: Optional[str] = None
+    image_url: Optional[str] = None
+    voice_id: Optional[str] = None
+    caricature_url: Optional[str] = None
+    talking_photo_url: Optional[str] = None
+    current_page: Optional[str] = None
+    current_step: Optional[int] = None
+    completed_modules: Optional[List[str]] = None
+
+class UserProgressUpdate(BaseModel):
+    currentPage: Optional[str] = None
+    currentStep: Optional[int] = None
+    caricatureUrl: Optional[str] = None
+    talkingPhotoUrl: Optional[str] = None
+    completedModules: Optional[List[str]] = None
+
+class QuizAnswerCreate(BaseModel):
+    user_id: int
+    module: str
+    answers: Dict[str, Any]
+
+class User(BaseModel):
+    id: int
+    name: str
+    age: int
+    gender: str
+    image_url: Optional[str] = None
+    voice_id: Optional[str] = None
+    caricature_url: Optional[str] = None
+    talking_photo_url: Optional[str] = None
+    current_page: Optional[str] = None
+    current_step: Optional[int] = 0
+    completed_modules: Optional[List[str]] = []
+
+class QuizAnswer(BaseModel):
+    id: int
+    user_id: int
+    module: str
+    answers: Dict[str, Any]
 # Replace SQLAlchemy with Supabase
 try:
     from supabase_service import SupabaseService
-    from supabase_models import User, UserCreate, UserUpdate, QuizAnswer, QuizAnswerCreate, UserProgressUpdate
+    print("✅ Supabase service module imported successfully")
     
     # Initialize Supabase service
     print("🔄 Initializing Supabase service...")
     print(f"   SUPABASE_URL: {os.getenv('SUPABASE_URL', 'NOT_SET')}")
     print(f"   SUPABASE_KEY: {'SET' if os.getenv('SUPABASE_KEY') else 'NOT_SET'}")
-    supabase_service = SupabaseService()
-    print("✅ Supabase service initialized successfully")
-    supabase_available = True
+    
+    # Only initialize if we have both URL and key
+    if os.getenv('SUPABASE_URL') and os.getenv('SUPABASE_KEY'):
+        supabase_service = SupabaseService()
+        print("✅ Supabase service initialized successfully")
+        supabase_available = True
+    else:
+        print("⚠️ Skipping Supabase initialization - missing credentials")
+        supabase_service = None
+        supabase_available = False
 except Exception as e:
     print(f"⚠️ Warning: Supabase service failed to initialize: {e}")
     supabase_service = None
@@ -679,7 +738,7 @@ async def generate_faceswap_image(request: dict):
         # Load face swap configuration
         import json
         import os
-        config_path = os.path.join(os.path.dirname(__file__), "face_swap_config.json")
+        config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "face_swap_config.json")
         with open(config_path, 'r', encoding='utf-8') as f:
             config = json.load(f)
         
