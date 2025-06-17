@@ -93,6 +93,7 @@ origins = [
     "https://ai-awareness-project-git-main-hanaisreals-projects.vercel.app",
     "https://ai-awareness-project.vercel.app",
     "https://ai-frontend-gules.vercel.app",
+    "https://ai-frontend-ck6r8pnui-hanaisreals-projects.vercel.app",
 ]
 
 app.add_middleware(
