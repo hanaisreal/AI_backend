@@ -3,21 +3,31 @@ import uuid
 import asyncio
 import time
 import re
-from fastapi import FastAPI, HTTPException, File, UploadFile, Form
+from fastapi import FastAPI, HTTPException, File, UploadFile, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
 from dotenv import load_dotenv
 import boto3
 from botocore.exceptions import NoCredentialsError, PartialCredentialsError, ClientError
 from typing import Optional, Dict, Any
 from urllib.parse import quote
 # Replace SQLAlchemy with Supabase
-from supabase_service import SupabaseService
-from supabase_models import User, UserCreate, UserUpdate, QuizAnswer, QuizAnswerCreate, UserProgressUpdate
-
-# Initialize Supabase service
-print("🔄 Initializing Supabase service...")
-supabase_service = SupabaseService()
-print("✅ Supabase service initialized successfully")
+try:
+    from supabase_service import SupabaseService
+    from supabase_models import User, UserCreate, UserUpdate, QuizAnswer, QuizAnswerCreate, UserProgressUpdate
+    
+    # Initialize Supabase service
+    print("🔄 Initializing Supabase service...")
+    print(f"   SUPABASE_URL: {os.getenv('SUPABASE_URL', 'NOT_SET')}")
+    print(f"   SUPABASE_KEY: {'SET' if os.getenv('SUPABASE_KEY') else 'NOT_SET'}")
+    supabase_service = SupabaseService()
+    print("✅ Supabase service initialized successfully")
+    supabase_available = True
+except Exception as e:
+    print(f"⚠️ Warning: Supabase service failed to initialize: {e}")
+    supabase_service = None
+    supabase_available = False
 from io import BytesIO
 import base64
 import json
@@ -65,58 +75,63 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Global exception handler to ensure CORS headers are always included
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"Internal server error: {str(exc)}"},
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "*",
+            "Access-Control-Allow-Headers": "*",
+        }
+    )
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail},
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "*",
+            "Access-Control-Allow-Headers": "*",
+        }
+    )
+
+# Add OPTIONS handler for preflight requests
+@app.options("/{full_path:path}")
+async def options_handler(full_path: str):
+    return JSONResponse(
+        content={},
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+            "Access-Control-Max-Age": "86400",
+        }
+    )
+
 # S3 Client Initialization and CORS Configuration
 s3_client = None
-if all([S3_BUCKET_NAME, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION]):
-    try:
+try:
+    if all([S3_BUCKET_NAME, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION]):
         s3_client = boto3.client(
             's3',
             aws_access_key_id=AWS_ACCESS_KEY_ID,
             aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
             region_name=AWS_REGION
         )
-        print("S3 client initialized successfully.")
-
-        # Define and apply S3 bucket CORS policy
-        cors_configuration = {
-            'CORSRules': [
-                {
-                    'AllowedHeaders': ['*'],
-                    'AllowedMethods': ['GET', 'HEAD'],
-                    'AllowedOrigins': [
-                        "http://localhost:3000",
-                        "http://localhost:5173", 
-                        "https://ai-frontend-gules.vercel.app",
-                        "https://*.vercel.app"
-                    ],
-                    'ExposeHeaders': ['ETag', 'Content-Length'],
-                    'MaxAgeSeconds': 3000
-                }
-            ]
-        }
+        print("✅ S3 client initialized successfully.")
         
-        print(f"Attempting to apply CORS policy to bucket '{S3_BUCKET_NAME}'...")
-        try:
-            s3_client.put_bucket_cors(
-                Bucket=S3_BUCKET_NAME,
-                CORSConfiguration=cors_configuration
-            )
-            print("✅ S3 bucket CORS policy applied successfully.")
-        except Exception as cors_error:
-            print(f"⚠️ Warning: Could not apply S3 CORS policy: {cors_error}")
-            # Don't fail the entire function if CORS setup fails
-
-    except ClientError as e:
-        if e.response['Error']['Code'] == 'NoSuchBucket':
-            print(f"❌ S3 Bucket '{S3_BUCKET_NAME}' does not exist. Please check your .env configuration.")
-        elif e.response['Error']['Code'] == 'AccessDenied':
-             print(f"❌ S3 Access Denied: Check if the IAM user has 'PutBucketCORS' permissions.")
-        else:
-            print(f"❌ S3 ClientError while applying CORS: {e}")
-    except Exception as e:
-        print(f"❌ Error initializing S3 client or setting CORS policy: {e}")
-else:
-    print("S3 client not initialized due to missing AWS credentials.")
+        # Skip CORS setup to avoid crashes
+        print("⚠️ S3 CORS setup skipped to prevent startup issues")
+    else:
+        print("⚠️ S3 client not initialized - missing AWS credentials")
+except Exception as e:
+    print(f"⚠️ Warning: S3 initialization failed: {e}")
+    s3_client = None
 
 # ElevenLabs Client Initialization
 elevenlabs_client = None
@@ -220,7 +235,7 @@ async def health_check():
             "s3": s3_client is not None,
             "elevenlabs": elevenlabs_client is not None,
             "openai": openai_client is not None,
-            "supabase": supabase_service.health_check()
+            "supabase": supabase_service.health_check() if supabase_available and supabase_service else False
         },
         "database": "supabase",
         "version": "2.0.0"
@@ -266,6 +281,8 @@ async def test_akool_token():
 @app.get("/api/users/{user_id}")
 def read_user(user_id: int):
     """Get user by ID from Supabase"""
+    if not supabase_available or not supabase_service:
+        raise HTTPException(status_code=503, detail="Database service unavailable")
     user = supabase_service.get_user(user_id)
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
@@ -276,6 +293,8 @@ def create_quiz_answer(quiz_answer: QuizAnswerCreate):
     """Save quiz answers to Supabase"""
     try:
         # Verify user exists first
+        if not supabase_available or not supabase_service:
+            raise HTTPException(status_code=503, detail="Database service unavailable")
         user = supabase_service.get_user(quiz_answer.user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
@@ -293,6 +312,8 @@ def create_quiz_answer(quiz_answer: QuizAnswerCreate):
 def update_user_progress(user_id: int, progress: UserProgressUpdate):
     """Update user progress in Supabase"""
     try:
+        if not supabase_available or not supabase_service:
+            raise HTTPException(status_code=503, detail="Database service unavailable")
         updated_user = supabase_service.update_user_progress(user_id, progress.dict(exclude_unset=True))
         if updated_user is None:
             raise HTTPException(status_code=404, detail="User not found")
@@ -306,6 +327,8 @@ def update_user_progress(user_id: int, progress: UserProgressUpdate):
 async def save_user_info(user: UserCreate):
     """Save user information and return success status with user ID"""
     try:
+        if not supabase_available or not supabase_service:
+            raise HTTPException(status_code=503, detail="Database service unavailable")
         db_user = supabase_service.create_user(user.dict())
         return {"success": True, "userId": str(db_user["id"])}
     except Exception as e:
@@ -373,6 +396,8 @@ async def complete_onboarding(
             "image_url": image_url,
             "voice_id": voice_id
         }
+        if not supabase_available or not supabase_service:
+            raise HTTPException(status_code=503, detail="Database service unavailable")
         db_user = supabase_service.create_user(user_data)
         
         print(f"✅ User created: ID {db_user['id']}")
