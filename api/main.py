@@ -11,8 +11,13 @@ from botocore.exceptions import NoCredentialsError, PartialCredentialsError, Cli
 from typing import Optional, Dict, Any
 from urllib.parse import quote
 # Replace SQLAlchemy with Supabase
-from supabase_service import supabase_service
+from supabase_service import SupabaseService
 from supabase_models import User, UserCreate, UserUpdate, QuizAnswer, QuizAnswerCreate, UserProgressUpdate
+
+# Initialize Supabase service
+print("🔄 Initializing Supabase service...")
+supabase_service = SupabaseService()
+print("✅ Supabase service initialized successfully")
 from io import BytesIO
 import base64
 import json
@@ -51,20 +56,11 @@ app = FastAPI(
 # Progress tracking storage
 progress_tracking: Dict[str, Dict[str, Any]] = {}
 
-# CORS configuration - Allow specific Vercel domains
-def cors_origin_regex_matcher(origin: str) -> bool:
-    """Allow localhost and any Vercel deployment URL"""
-    allowed_patterns = [
-        r"^http://localhost:\d+$",
-        r"^https://.*\.vercel\.app$",
-        r"^https://ai-frontend.*\.vercel\.app$"
-    ]
-    return any(re.match(pattern, origin) for pattern in allowed_patterns)
-
+# CORS configuration - Allow all origins for debugging
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r"^https://.*\.vercel\.app$|^http://localhost:\d+$",
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,  # Must be False when allow_origins is ["*"]
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -87,7 +83,12 @@ if all([S3_BUCKET_NAME, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION]):
                 {
                     'AllowedHeaders': ['*'],
                     'AllowedMethods': ['GET', 'HEAD'],
-                    'AllowedOrigins': CORS_ORIGINS,  # Use the same list as FastAPI
+                    'AllowedOrigins': [
+                        "http://localhost:3000",
+                        "http://localhost:5173", 
+                        "https://ai-frontend-gules.vercel.app",
+                        "https://*.vercel.app"
+                    ],
                     'ExposeHeaders': ['ETag', 'Content-Length'],
                     'MaxAgeSeconds': 3000
                 }
@@ -95,11 +96,15 @@ if all([S3_BUCKET_NAME, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION]):
         }
         
         print(f"Attempting to apply CORS policy to bucket '{S3_BUCKET_NAME}'...")
-        s3_client.put_bucket_cors(
-            Bucket=S3_BUCKET_NAME,
-            CORSConfiguration=cors_configuration
-        )
-        print("✅ S3 bucket CORS policy applied successfully.")
+        try:
+            s3_client.put_bucket_cors(
+                Bucket=S3_BUCKET_NAME,
+                CORSConfiguration=cors_configuration
+            )
+            print("✅ S3 bucket CORS policy applied successfully.")
+        except Exception as cors_error:
+            print(f"⚠️ Warning: Could not apply S3 CORS policy: {cors_error}")
+            # Don't fail the entire function if CORS setup fails
 
     except ClientError as e:
         if e.response['Error']['Code'] == 'NoSuchBucket':

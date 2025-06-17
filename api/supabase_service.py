@@ -14,7 +14,46 @@ class SupabaseService:
         if not self.supabase_url or not self.supabase_key:
             raise ValueError("SUPABASE_URL and SUPABASE_KEY environment variables are required")
         
-        self.client: Client = create_client(self.supabase_url, self.supabase_key)
+        try:
+            self.client: Client = create_client(self.supabase_url, self.supabase_key)
+            print(f"✅ Supabase client initialized successfully")
+            print(f"   URL: {self.supabase_url}")
+            print(f"   Key: {self.supabase_key[:20]}...")
+            
+            # Test connection
+            self.test_connection()
+            print("✅ Supabase connection verified")
+            
+            # Try to initialize tables (optional)
+            try:
+                self.create_tables()
+                print("✅ Supabase tables initialized")
+            except Exception as table_error:
+                print(f"⚠️ Warning: Could not auto-create tables: {table_error}")
+                print("📝 Please run the SQL script manually in Supabase dashboard if tables don't exist")
+        except Exception as e:
+            print(f"❌ Failed to initialize Supabase client: {e}")
+            raise
+    
+    def test_connection(self):
+        """Test the Supabase connection"""
+        try:
+            # Simple test query to verify connection
+            result = self.client.table('information_schema.tables').select('table_name').limit(1).execute()
+            return True
+        except Exception as e:
+            # If the above fails, try a different approach
+            try:
+                # Try to access any table - this will fail gracefully if no connection
+                result = self.client.table('users').select('id').limit(1).execute()
+                return True
+            except Exception as e2:
+                if 'does not exist' in str(e2).lower():
+                    # Connection works, table just doesn't exist
+                    return True
+                else:
+                    # Real connection error
+                    raise e2
     
     def create_tables(self):
         """Create the necessary tables in Supabase using SQL queries"""
@@ -74,10 +113,16 @@ class SupabaseService:
                 FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
             """
             
-            # Execute the full SQL script
-            result = self.client.rpc('exec_sql', {'sql': full_sql}).execute()
-            print("✅ Database tables, indexes, and triggers created successfully")
-            return True
+            # Try to execute SQL using the built-in sql method
+            try:
+                result = self.client.sql(full_sql).execute()
+                print("✅ Database tables, indexes, and triggers created successfully")
+                return True
+            except AttributeError:
+                # If sql method doesn't exist, try rpc approach
+                result = self.client.rpc('exec_sql', {'sql': full_sql}).execute()
+                print("✅ Database tables, indexes, and triggers created successfully (via RPC)")
+                return True
             
         except Exception as e:
             print(f"❌ Error creating tables: {e}")
@@ -201,5 +246,4 @@ class SupabaseService:
                 print(f"❌ Supabase health check failed: {e2}")
                 return False
 
-# Global instance
-supabase_service = SupabaseService()
+# Note: SupabaseService is now instantiated directly in main.py
