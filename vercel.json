@@ -1,14 +1,31 @@
 {
   "version": 2,
   "functions": {
-    "api/main.py": {
-      "runtime": "python3.9"
+    "api/**/*.py": {
+      "memory": 1024,
+      "maxDuration": 60
     }
   },
   "routes": [
     {
-      "src": "/(.*)",
-      "dest": "/api/main.py"
+      "src": "/api/(.*)",
+      "dest": "/api/main.py",
+      "headers": {
+        "Access-Control-Allow-Origin": "https://ai-frontend-gules.vercel.app",
+        "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization",
+        "Access-Control-Allow-Credentials": "true"
+      }
+    },
+    {
+      "src": "/",
+      "dest": "/api/main.py",
+      "headers": {
+        "Access-Control-Allow-Origin": "https://ai-frontend-gules.vercel.app",
+        "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization",
+        "Access-Control-Allow-Credentials": "true"
+      }
     }
   ]
 }
