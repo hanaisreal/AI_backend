@@ -2,6 +2,7 @@ import os
 import uuid
 import asyncio
 import time
+import re
 from fastapi import FastAPI, HTTPException, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
@@ -50,17 +51,19 @@ app = FastAPI(
 # Progress tracking storage
 progress_tracking: Dict[str, Dict[str, Any]] = {}
 
-# CORS configuration
-CORS_ORIGINS = [
-    "http://localhost:3000",
-    "http://localhost:5173",
-    "https://ai-frontend-gules.vercel.app",
-    "https://*.vercel.app"
-]
+# CORS configuration - Allow specific Vercel domains
+def cors_origin_regex_matcher(origin: str) -> bool:
+    """Allow localhost and any Vercel deployment URL"""
+    allowed_patterns = [
+        r"^http://localhost:\d+$",
+        r"^https://.*\.vercel\.app$",
+        r"^https://ai-frontend.*\.vercel\.app$"
+    ]
+    return any(re.match(pattern, origin) for pattern in allowed_patterns)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=CORS_ORIGINS,
+    allow_origin_regex=r"^https://.*\.vercel\.app$|^http://localhost:\d+$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
