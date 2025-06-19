@@ -572,8 +572,8 @@ async def generate_narration(request: dict):
             voice_id=voice_id,
             model_id="eleven_multilingual_v2",
             voice_settings={
-                "stability": 0.5,
-                "similarity_boost": 0.8,
+                "stability": 0.6,
+                "similarity_boost": 0.7,
                 "speed": 1.1  # 10% faster
             }
         )
@@ -770,31 +770,55 @@ async def generate_faceswap_image(request: dict):
         print(f"  - Base image opts: {base_image_opts}")
         
         print("\n" + "-"*80)
-        print("🔍 STEP 2: Detect face in user image")
+        print("🔍 STEP 2: Get or detect face opts for user image")
         
-        # Detect face in user image
-        import httpx
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            detect_response = await client.post(
-                "https://sg3.akool.com/detect",
-                headers={"Content-Type": "application/json"},
-                json={"image_url": user_image_url}
-            )
-            
-            print(f"  - Detect API status: {detect_response.status_code}")
-            
-            if detect_response.status_code != 200:
-                print(f"❌ ERROR: Face detection failed: {detect_response.text}")
-                raise HTTPException(status_code=500, detail="Face detection failed")
-            
-            detect_data = detect_response.json()
-            user_image_opts = detect_data.get("landmarks_str", "")
-            
-            if not user_image_opts:
-                print(f"❌ ERROR: No face detected in user image")
-                raise HTTPException(status_code=400, detail="No face detected in user image")
-            
-            print(f"  - User image opts: {user_image_opts}")
+        # Try to get cached face opts from database first
+        user_image_opts = None
+        if supabase_available and supabase_service:
+            try:
+                # Find user by image URL to get cached face opts
+                users_result = supabase_service.client.table('users').select('id, face_opts').eq('image_url', user_image_url).execute()
+                if users_result.data:
+                    cached_opts = users_result.data[0].get('face_opts')
+                    if cached_opts:
+                        user_image_opts = cached_opts
+                        print(f"  - ✅ Using cached face opts: {user_image_opts}")
+            except Exception as cache_error:
+                print(f"  - ⚠️ Cache lookup failed: {cache_error}")
+        
+        # If no cached opts, detect face in user image
+        if not user_image_opts:
+            print(f"  - 🔄 No cached face opts found, detecting face...")
+            import httpx
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                detect_response = await client.post(
+                    "https://sg3.akool.com/detect",
+                    headers={"Content-Type": "application/json"},
+                    json={"image_url": user_image_url}
+                )
+                
+                print(f"  - Detect API status: {detect_response.status_code}")
+                
+                if detect_response.status_code != 200:
+                    print(f"❌ ERROR: Face detection failed: {detect_response.text}")
+                    raise HTTPException(status_code=500, detail="Face detection failed")
+                
+                detect_data = detect_response.json()
+                user_image_opts = detect_data.get("landmarks_str", "")
+                
+                if not user_image_opts:
+                    print(f"❌ ERROR: No face detected in user image")
+                    raise HTTPException(status_code=400, detail="No face detected in user image")
+                
+                print(f"  - ✅ Detected face opts: {user_image_opts}")
+                
+                # Cache the face opts in database for future use
+                if supabase_available and supabase_service:
+                    try:
+                        supabase_service.client.table('users').update({'face_opts': user_image_opts}).eq('image_url', user_image_url).execute()
+                        print(f"  - 💾 Cached face opts for future use")
+                    except Exception as cache_error:
+                        print(f"  - ⚠️ Failed to cache face opts: {cache_error}")
         
         print("\n" + "-"*80)
         print("🎭 STEP 3: Submit high-quality face swap job")
@@ -1039,10 +1063,8 @@ async def generate_talking_photo(request: dict):
             ExtraArgs={'ACL': 'public-read', 'ContentType': 'audio/mpeg'}
         )
         
-        # URL encode the object name for proper S3 access
-        from urllib.parse import quote
-        encoded_object_name = quote(audio_object_name, safe='/')
-        audio_url = f"https://{S3_BUCKET_NAME}.s3.{AWS_REGION}.amazonaws.com/{encoded_object_name}"
+        # Use CloudFront CDN URL for faster audio delivery
+        audio_url = f"https://{CLOUDFRONT_DOMAIN}/{audio_object_name}"
         print(f"✅ Audio generated and uploaded to S3")
         print(f"  - S3 Object: {audio_object_name}")
         print(f"  - Safe user name: '{safe_user_name}'")
@@ -1150,22 +1172,23 @@ async def generate_talking_photo(request: dict):
             
         print(f"\n" + "-"*80)
         print(f"🔄 STEP 4: Starting to poll for video status (Task ID: {task_id})")
-        print(f"  - Interval: 10 seconds")
-        print(f"  - Max Attempts: 36 (6 minutes)")
+        print(f"  - Strategy: Exponential backoff (5s, 10s, 15s, 20s, 30s, then 30s intervals)")
+        print(f"  - Max Duration: 8 minutes total")
         print(f"  - Initial delay: 5 seconds to allow job initialization")
         print("-"*80)
             
         # Give Akool time to initialize the job
         await asyncio.sleep(5)
             
-        # Polling for completion
-        max_attempts = 36  # 6 minutes with 10-second intervals
-        for attempt in range(max_attempts):
+        # Optimized polling with exponential backoff
+        polling_intervals = [5, 10, 15, 20, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30]  # ~8 minutes total
+        for attempt, interval in enumerate(polling_intervals):
             if attempt > 0:  # Skip sleep on first attempt since we already waited 5 seconds
-                await asyncio.sleep(10)
+                await asyncio.sleep(interval)
+                print(f"  - Next poll in {polling_intervals[attempt] if attempt < len(polling_intervals)-1 else 30}s")
                 
             status_url = f"https://openapi.akool.com/api/open/v3/content/video/infobymodelid?video_model_id={task_id}"
-            print(f"\n[Polling - Attempt {attempt + 1}/{max_attempts}]")
+            print(f"\n[Polling - Attempt {attempt + 1}/{len(polling_intervals)}]")
             print(f"  - Calling: GET {status_url}")
             
             polling_headers = {"Authorization": f"Bearer {akool_auth_token}"}
@@ -1279,11 +1302,12 @@ async def generate_talking_photo(request: dict):
                 else:
                     print(f"  - Received non-200 status on poll: {status_response.status_code} - {status_response.text}")
         
-        # This timeout logic should only run AFTER the for loop completes (all 36 attempts exhausted)
+        # This timeout logic should only run AFTER the for loop completes (all polling attempts exhausted)
         print("\n" + "!"*80)
-        print("⏰ TIMEOUT: Akool video generation timed out after 6 minutes.")
+        print("⏰ TIMEOUT: Akool video generation timed out after 8 minutes.")
         print("💡 Using sample video fallback due to timeout")
         print(f"   - Task ID: {task_id}")
+        print(f"   - Total attempts: {len(polling_intervals)}")
         print("!"*80)
         return {
             "videoUrl": sample_video_url,

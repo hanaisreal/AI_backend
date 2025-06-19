@@ -70,6 +70,7 @@ class SupabaseService:
                 voice_id VARCHAR(255),
                 caricature_url TEXT,
                 talking_photo_url TEXT,
+                face_opts TEXT,
                 current_page VARCHAR(100),
                 current_step INTEGER DEFAULT 0,
                 completed_modules JSONB DEFAULT '[]'::jsonb,
@@ -89,6 +90,7 @@ class SupabaseService:
 
             -- Create indexes for better performance
             CREATE INDEX IF NOT EXISTS idx_users_voice_id ON users(voice_id);
+            CREATE INDEX IF NOT EXISTS idx_users_image_url ON users(image_url);
             CREATE INDEX IF NOT EXISTS idx_quiz_answers_user_id ON quiz_answers(user_id);
             CREATE INDEX IF NOT EXISTS idx_quiz_answers_module ON quiz_answers(module);
 
@@ -181,18 +183,27 @@ class SupabaseService:
     def update_user_progress(self, user_id: int, progress_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Update user progress"""
         try:
+            print(f"🔄 BACKEND: Updating user {user_id} progress")
+            print(f"   - Raw progress data: {progress_data}")
+            
             update_data = {}
             if 'currentPage' in progress_data:
                 update_data['current_page'] = progress_data['currentPage']
+                print(f"   - Updating current_page: {progress_data['currentPage']}")
             if 'currentStep' in progress_data:
                 update_data['current_step'] = progress_data['currentStep']
+                print(f"   - Updating current_step: {progress_data['currentStep']}")
             if 'caricatureUrl' in progress_data:
                 update_data['caricature_url'] = progress_data['caricatureUrl']
+                print(f"   - Updating caricature_url: {progress_data['caricatureUrl']}")
             if 'talkingPhotoUrl' in progress_data:
                 update_data['talking_photo_url'] = progress_data['talkingPhotoUrl']
+                print(f"   - Updating talking_photo_url: {progress_data['talkingPhotoUrl']}")
             if 'completedModules' in progress_data:
                 update_data['completed_modules'] = json.dumps(progress_data['completedModules'])
+                print(f"   - Updating completed_modules: {progress_data['completedModules']}")
             
+            print(f"   - Final update_data: {update_data}")
             return self.update_user(user_id, update_data)
         except Exception as e:
             print(f"❌ Error updating user progress: {e}")
