@@ -570,7 +570,12 @@ async def generate_narration(request: dict):
         audio_stream = elevenlabs_client.text_to_speech.convert(
             text=script,
             voice_id=voice_id,
-            model_id="eleven_multilingual_v2"
+            model_id="eleven_multilingual_v2",
+            voice_settings={
+                "stability": 0.5,
+                "similarity_boost": 0.8,
+                "speed": 1.1  # 10% faster
+            }
         )
         
         # Return audio data directly as base64 for immediate playback
@@ -999,7 +1004,12 @@ async def generate_talking_photo(request: dict):
         audio_stream = elevenlabs_client.text_to_speech.convert(
             text=korean_script,
             voice_id=voice_id,
-            model_id="eleven_multilingual_v2"
+            model_id="eleven_multilingual_v2",
+            voice_settings={
+                "stability": 0.5,
+                "similarity_boost": 0.8,
+                "speed": 1.1  # 10% faster
+            }
         )
         
         # Save audio to S3 with user-specific naming
