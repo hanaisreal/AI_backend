@@ -60,7 +60,7 @@ class SupabaseService:
         try:
             # Full SQL script to create all tables, indexes, and triggers
             full_sql = """
-            -- Create users table
+            -- Create users table with pre-generated content
             CREATE TABLE IF NOT EXISTS users (
                 id SERIAL PRIMARY KEY,
                 name VARCHAR(255) NOT NULL,
@@ -71,6 +71,27 @@ class SupabaseService:
                 caricature_url TEXT,
                 talking_photo_url TEXT,
                 face_opts TEXT,
+                
+                -- Pre-generated Module 1 content (Fake News)
+                lottery_faceswap_url TEXT,
+                lottery_video_url TEXT,
+                crime_faceswap_url TEXT,
+                crime_video_url TEXT,
+                
+                -- Pre-generated Module 2 content (Identity Theft)
+                investment_call_audio_url TEXT,
+                accident_call_audio_url TEXT,
+                
+                -- Pre-generated Narrations (JSON object with script_id -> audio_url mapping)
+                narration_urls JSONB DEFAULT '{}'::jsonb,
+                
+                -- Pre-generation status tracking
+                pre_generation_status VARCHAR(50) DEFAULT 'pending',
+                pre_generation_started_at TIMESTAMP WITH TIME ZONE,
+                pre_generation_completed_at TIMESTAMP WITH TIME ZONE,
+                pre_generation_error TEXT,
+                
+                -- User progress tracking
                 current_page VARCHAR(100),
                 current_step INTEGER DEFAULT 0,
                 completed_modules JSONB DEFAULT '[]'::jsonb,
@@ -91,6 +112,7 @@ class SupabaseService:
             -- Create indexes for better performance
             CREATE INDEX IF NOT EXISTS idx_users_voice_id ON users(voice_id);
             CREATE INDEX IF NOT EXISTS idx_users_image_url ON users(image_url);
+            CREATE INDEX IF NOT EXISTS idx_users_pre_generation_status ON users(pre_generation_status);
             CREATE INDEX IF NOT EXISTS idx_quiz_answers_user_id ON quiz_answers(user_id);
             CREATE INDEX IF NOT EXISTS idx_quiz_answers_module ON quiz_answers(module);
 
@@ -256,5 +278,130 @@ class SupabaseService:
                     return True  # Connection works, table just doesn't exist yet
                 print(f"❌ Supabase health check failed: {e2}")
                 return False
+
+    # ===================================================================================
+    # HYBRID STRATEGY METHODS
+    # ===================================================================================
+    
+    # Narration Cache Operations
+    async def get_narration_cache(self, user_id: int, step_id: str, script_hash: str):
+        """Get cached narration for user and step"""
+        try:
+            result = self.client.table('narration_cache').select("*").eq('user_id', user_id).eq('step_id', step_id).eq('script_hash', script_hash).execute()
+            return result.data[0] if result.data else None
+        except Exception as e:
+            print(f"❌ Error getting narration cache: {e}")
+            return None
+    
+    async def create_narration_cache(self, cache_data: dict):
+        """Create new narration cache entry"""
+        try:
+            result = self.client.table('narration_cache').insert(cache_data).execute()
+            return result.data[0] if result.data else None
+        except Exception as e:
+            print(f"❌ Error creating narration cache: {e}")
+            raise
+    
+    async def update_narration_cache_access(self, cache_id: int):
+        """Update access count and timestamp for cache entry"""
+        try:
+            from datetime import datetime
+            update_data = {
+                'access_count': 'access_count + 1',
+                'last_accessed_at': datetime.now().isoformat()
+            }
+            result = self.client.table('narration_cache').update(update_data).eq('id', cache_id).execute()
+            return result.data[0] if result.data else None
+        except Exception as e:
+            print(f"❌ Error updating narration cache access: {e}")
+    
+    async def delete_narration_cache(self, cache_id: int):
+        """Delete expired cache entry"""
+        try:
+            result = self.client.table('narration_cache').delete().eq('id', cache_id).execute()
+            return True
+        except Exception as e:
+            print(f"❌ Error deleting narration cache: {e}")
+            return False
+    
+    async def cleanup_expired_narration_cache(self):
+        """Clean up expired cache entries"""
+        try:
+            from datetime import datetime
+            result = self.client.table('narration_cache').delete().lt('expires_at', datetime.now().isoformat()).execute()
+            return len(result.data) if result.data else 0
+        except Exception as e:
+            print(f"❌ Error cleaning up expired cache: {e}")
+            return 0
+    
+    # Scenario Generation Job Operations
+    async def create_scenario_job(self, job_data: dict):
+        """Create new scenario generation job"""
+        try:
+            result = self.client.table('scenario_generation_jobs').insert(job_data).execute()
+            return result.data[0] if result.data else None
+        except Exception as e:
+            print(f"❌ Error creating scenario job: {e}")
+            raise
+    
+    async def update_scenario_job(self, job_id: int, update_data: dict):
+        """Update scenario generation job status"""
+        try:
+            result = self.client.table('scenario_generation_jobs').update(update_data).eq('id', job_id).execute()
+            return result.data[0] if result.data else None
+        except Exception as e:
+            print(f"❌ Error updating scenario job: {e}")
+            raise
+    
+    async def get_scenario_jobs(self, user_id: int):
+        """Get all scenario jobs for user"""
+        try:
+            result = self.client.table('scenario_generation_jobs').select("*").eq('user_id', user_id).execute()
+            return result.data or []
+        except Exception as e:
+            print(f"❌ Error getting scenario jobs: {e}")
+            return []
+    
+    # Cache Statistics
+    async def get_narration_cache_stats(self, user_id: int):
+        """Get cache statistics for user"""
+        try:
+            result = self.client.table('narration_cache').select("*").eq('user_id', user_id).execute()
+            cache_entries = result.data or []
+            
+            from datetime import datetime
+            now = datetime.now()
+            
+            active_count = sum(1 for entry in cache_entries if entry.get('expires_at') and datetime.fromisoformat(entry['expires_at'].replace('Z', '+00:00')) > now)
+            total_access = sum(entry.get('access_count', 0) for entry in cache_entries)
+            
+            return {
+                'total_cached': len(cache_entries),
+                'active_cached': active_count,
+                'expired_cached': len(cache_entries) - active_count,
+                'total_access_count': total_access,
+                'cache_hit_rate': min(1.0, total_access / max(1, len(cache_entries)))
+            }
+        except Exception as e:
+            print(f"❌ Error getting cache stats: {e}")
+            return {}
+    
+    async def get_user_narration_cache(self, user_id: int):
+        """Get all narration cache entries for user"""
+        try:
+            result = self.client.table('narration_cache').select("*").eq('user_id', user_id).execute()
+            return result.data or []
+        except Exception as e:
+            print(f"❌ Error getting user narration cache: {e}")
+            return []
+    
+    async def clear_user_narration_cache(self, user_id: int):
+        """Clear all cache entries for user"""
+        try:
+            result = self.client.table('narration_cache').delete().eq('user_id', user_id).execute()
+            return len(result.data) if result.data else 0
+        except Exception as e:
+            print(f"❌ Error clearing user cache: {e}")
+            return 0
 
 # Note: SupabaseService is now instantiated directly in main.py

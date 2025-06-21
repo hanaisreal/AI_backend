@@ -64,9 +64,9 @@ class QuizAnswer(BaseModel):
     user_id: int
     module: str
     answers: Dict[str, Any]
-# Replace SQLAlchemy with Supabase
+# Initialize Supabase service
 try:
-    from supabase_service import SupabaseService
+    from .supabase_service import SupabaseService
     print("✅ Supabase service module imported successfully")
     
     # Initialize Supabase service
@@ -113,7 +113,7 @@ except ImportError as e:
     openai_import_available = False
 
 try:
-    from s3_service import s3_service
+    from .s3_service import s3_service
     s3_service_available = True
 except ImportError as e:
     print(f"⚠️ S3 service import failed: {e}")
@@ -519,6 +519,17 @@ async def complete_onboarding(
         print(f"✅ User created: ID {db_user['id']}")
         print(f"🎉 COMPLETE: Onboarding finished successfully for {name}")
         
+        # Trigger scenario pre-generation immediately during onboarding
+        user_id = db_user["id"]
+        print(f"🚀 STARTING: Scenario pre-generation for user {user_id}")
+        
+        # Use asyncio.create_task to run in background without blocking the response
+        if supabase_available and supabase_service:
+            asyncio.create_task(trigger_scenario_pregeneration(user_id, image_url, voice_id, gender))
+            print(f"✅ Scenario pre-generation task started for user {user_id}")
+        else:
+            print(f"⚠️ Scenario pre-generation skipped - Supabase unavailable")
+        
         return {
             "success": True,
             "userId": str(db_user["id"]),
@@ -532,7 +543,8 @@ async def complete_onboarding(
             },
             "imageUrl": image_url,
             "voiceId": voice_id,
-            "voiceName": voice_name
+            "voiceName": voice_name,
+            "message": "Onboarding completed. Scenario generation started in background."
         }
         
     except HTTPException:
@@ -977,6 +989,7 @@ async def generate_talking_photo(request: dict):
     voice_id = request.get("voiceId", "")
     audio_script = request.get("audioScript", "")  # Custom audio script for scenarios
     scenario_type = request.get("scenarioType", "default")  # For different sample videos
+    extended_timeout = request.get("extendedTimeout", False)  # For pre-generation with longer timeout
     
     print("\n" + "="*80)
     print("🎬 STARTING: Generate Talking Photo")
@@ -1172,16 +1185,22 @@ async def generate_talking_photo(request: dict):
             
         print(f"\n" + "-"*80)
         print(f"🔄 STEP 4: Starting to poll for video status (Task ID: {task_id})")
-        print(f"  - Strategy: Exponential backoff (5s, 10s, 15s, 20s, 30s, then 30s intervals)")
-        print(f"  - Max Duration: 8 minutes total")
+        
+        # Use extended timeout for pre-generation scenarios
+        if extended_timeout:
+            print(f"  - Strategy: Extended timeout for pre-generation (5s, 10s, 15s, 20s, 30s intervals)")
+            print(f"  - Max Duration: 13 minutes total")
+            polling_intervals = [5, 10, 15, 20, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30]  # ~13 minutes
+        else:
+            print(f"  - Strategy: Standard timeout (5s, 10s, 15s, 20s, 30s intervals)")
+            print(f"  - Max Duration: 8 minutes total")
+            polling_intervals = [5, 10, 15, 20, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30]  # ~8 minutes
+            
         print(f"  - Initial delay: 5 seconds to allow job initialization")
         print("-"*80)
             
         # Give Akool time to initialize the job
         await asyncio.sleep(5)
-            
-        # Optimized polling with exponential backoff
-        polling_intervals = [5, 10, 15, 20, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30]  # ~8 minutes total
         for attempt, interval in enumerate(polling_intervals):
             if attempt > 0:  # Skip sleep on first attempt since we already waited 5 seconds
                 await asyncio.sleep(interval)
@@ -1279,6 +1298,9 @@ async def generate_talking_photo(request: dict):
                                 print("🎉 SUCCESS: Talking Photo generation complete (using CDN).")
                                 print("="*80)
 
+                                # Trigger scenario pre-generation after first talking photo
+                                await trigger_scenario_pregeneration_after_first_talking_photo(user_name, voice_id)
+
                                 return {"videoUrl": cloudfront_url}
                                 
                         except Exception as upload_error:
@@ -1289,11 +1311,18 @@ async def generate_talking_photo(request: dict):
                             print("🎉 SUCCESS: Using Akool video URL directly.")
                             print("="*80)
                             
+                            # Trigger scenario pre-generation after first talking photo
+                            await trigger_scenario_pregeneration_after_first_talking_photo(user_name, voice_id)
+                            
                             return {"videoUrl": akool_video_url}
                         
                     elif video_status == 4:  # Failed
                         error_message = status_data.get("error_msg", "Akool video generation failed")
                         print(f"❌ ERROR: {error_message}, using sample video")
+                        
+                        # Still trigger scenario pre-generation even with sample video
+                        await trigger_scenario_pregeneration_after_first_talking_photo(user_name, voice_id)
+                        
                         return {
                             "videoUrl": sample_video_url,
                             "message": "서버 과부하로 인해 샘플 영상을 보여드립니다",
@@ -1303,12 +1332,18 @@ async def generate_talking_photo(request: dict):
                     print(f"  - Received non-200 status on poll: {status_response.status_code} - {status_response.text}")
         
         # This timeout logic should only run AFTER the for loop completes (all polling attempts exhausted)
+        timeout_duration = "13 minutes" if extended_timeout else "8 minutes"
         print("\n" + "!"*80)
-        print("⏰ TIMEOUT: Akool video generation timed out after 8 minutes.")
+        print(f"⏰ TIMEOUT: Akool video generation timed out after {timeout_duration}.")
         print("💡 Using sample video fallback due to timeout")
         print(f"   - Task ID: {task_id}")
         print(f"   - Total attempts: {len(polling_intervals)}")
+        print(f"   - Extended timeout: {extended_timeout}")
         print("!"*80)
+        
+        # Still trigger scenario pre-generation even with timeout sample video
+        await trigger_scenario_pregeneration_after_first_talking_photo(user_name, voice_id)
+        
         return {
             "videoUrl": sample_video_url,
             "message": "서버 과부하로 인해 샘플 영상을 보여드립니다",
@@ -1597,4 +1632,152 @@ async def generate_faceswap_video(request: dict):
     except Exception as e:
         print(f"Error generating faceswap video: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to generate faceswap video: {str(e)}")
+
+# ===================================================================================
+# HYBRID STRATEGY ENDPOINTS
+# ===================================================================================
+
+# Import hybrid services
+try:
+    from .hybrid_api_endpoints import (
+        initialize_hybrid_services, start_scenario_pregeneration_endpoint,
+        smart_narration_endpoint, get_scenario_status_endpoint, 
+        get_cache_stats_endpoint, cleanup_cache_endpoint
+    )
+    from .hybrid_models import SmartNarrationRequest
+    
+    # Initialize hybrid services if supabase is available
+    if supabase_available and supabase_service:
+        initialize_hybrid_services(supabase_service, "http://localhost:8000")
+        print("✅ Hybrid services initialized successfully")
+        print("📍 Creating FULL smart-narration endpoint with SmartNarrationRequest")
+        
+        # Define hybrid endpoints only when services are available
+        @app.post("/api/smart-narration")
+        async def smart_narration(request: SmartNarrationRequest):
+            """Smart narration with caching and preloading"""
+            try:
+                return await smart_narration_endpoint(request)
+            except Exception as e:
+                print(f"❌ Smart narration error: {e}")
+                # Fallback to regular narration
+                try:
+                    legacy_result = await generate_narration({
+                        "script": request.current_script,
+                        "voiceId": request.voice_id
+                    })
+                    return {
+                        "current_audio_url": f"data:audio/mpeg;base64,{legacy_result['audioData']}",
+                        "current_audio_type": legacy_result["audioType"],
+                        "cache_hit": False,
+                        "preload_started": False,
+                        "message": "Fallback to legacy narration"
+                    }
+                except Exception as fallback_error:
+                    raise HTTPException(status_code=500, detail=f"Smart narration failed: {str(e)}")
+    else:
+        print("⚠️ Hybrid services not initialized - Supabase unavailable")
+        print("📍 Creating FALLBACK smart-narration endpoint with BasicSmartNarrationRequest")
+        
+        # Define fallback endpoints when services are not available  
+        # Need to create a basic request model for the fallback
+        from pydantic import BaseModel
+        
+        class BasicSmartNarrationRequest(BaseModel):
+            user_id: int
+            current_step_id: str
+            current_script: str
+            voice_id: str
+            preload_next_step_id: Optional[str] = None
+            preload_next_script: Optional[str] = None
+        
+        @app.post("/api/smart-narration")
+        async def smart_narration_fallback(request: BasicSmartNarrationRequest):
+            """Fallback smart narration endpoint when hybrid services unavailable"""
+            try:
+                legacy_result = await generate_narration({
+                    "script": request.current_script,
+                    "voiceId": request.voice_id
+                })
+                return {
+                    "current_audio_url": f"data:audio/mpeg;base64,{legacy_result['audioData']}",
+                    "current_audio_type": legacy_result["audioType"],
+                    "cache_hit": False,
+                    "preload_started": False,
+                    "message": "Using legacy narration (hybrid services unavailable)"
+                }
+            except Exception as fallback_error:
+                raise HTTPException(status_code=500, detail=f"Narration failed: {str(fallback_error)}")
+
+    @app.get("/api/scenario-status/{user_id}")
+    async def get_scenario_status(user_id: int):
+        """Get scenario generation status for user"""
+        try:
+            return await get_scenario_status_endpoint(user_id)
+        except Exception as e:
+            print(f"❌ Scenario status error: {e}")
+            return {"status": "unknown", "error": str(e)}
+
+    @app.get("/api/cache-stats/{user_id}")
+    async def get_cache_stats(user_id: int):
+        """Get narration cache statistics for user"""
+        try:
+            return await get_cache_stats_endpoint(user_id)
+        except Exception as e:
+            print(f"❌ Cache stats error: {e}")
+            return {"error": str(e)}
+
+    @app.post("/api/cleanup-cache")
+    async def cleanup_cache():
+        """Clean up expired cache entries"""
+        try:
+            return await cleanup_cache_endpoint()
+        except Exception as e:
+            print(f"❌ Cache cleanup error: {e}")
+            return {"error": str(e)}
+
+except Exception as e:
+    print(f"⚠️ Warning: Hybrid services failed to initialize: {e}")
+    # Endpoints are already defined conditionally in the try block above
+    pass
+
+# Trigger scenario pre-generation after caricature completion
+async def trigger_scenario_pregeneration_after_first_talking_photo(user_name: str, voice_id: str):
+    """Trigger scenario pre-generation after first talking photo is complete"""
+    try:
+        if not supabase_available or not supabase_service:
+            print("⚠️ Scenario pre-generation skipped - Supabase unavailable")
+            return
+            
+        # Find user by voice_id since that's unique and available
+        user = supabase_service.get_user_by_voice_id(voice_id)
+        if not user:
+            print(f"⚠️ User not found with voice_id {voice_id} for scenario pre-generation")
+            return
+            
+        user_id = user['id']
+        user_image_url = user['image_url']
+        gender = user['gender']
+        
+        print(f"🚀 First talking photo complete - triggering scenario pre-generation for user {user_id}")
+        
+        # Use asyncio.create_task to run in background without blocking the response
+        asyncio.create_task(trigger_scenario_pregeneration(user_id, user_image_url, voice_id, gender))
+        
+    except Exception as e:
+        print(f"❌ Error triggering scenario pre-generation after talking photo: {e}")
+
+async def trigger_scenario_pregeneration(user_id: int, user_image_url: str, voice_id: str, gender: str):
+    """Trigger scenario pre-generation in background"""
+    try:
+        if supabase_available and supabase_service:
+            result = await start_scenario_pregeneration_endpoint(user_id, user_image_url, voice_id, gender)
+            if result and result.get("status") == "in_progress":
+                print(f"✅ Scenario pre-generation started for user {user_id}")
+            else:
+                print(f"⚠️ Scenario pre-generation failed to start for user {user_id}")
+        else:
+            print("⚠️ Scenario pre-generation skipped - Supabase unavailable")
+    except Exception as e:
+        print(f"❌ Error starting scenario pre-generation: {e}")
 
