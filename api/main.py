@@ -13,6 +13,7 @@ from botocore.exceptions import NoCredentialsError, PartialCredentialsError, Cli
 from typing import Optional, Dict, Any, List
 from urllib.parse import quote
 from pydantic import BaseModel
+import httpx
 
 # Define base models that will always be available (before any import attempts)
 class UserCreate(BaseModel):
@@ -404,6 +405,89 @@ def read_user(user_id: int):
         raise HTTPException(status_code=404, detail="User not found")
     return user
 
+@app.post("/api/trigger-scenario-generation/{user_id}")
+async def trigger_scenario_generation_manual(user_id: int):
+    """Manually trigger scenario generation for testing"""
+    try:
+        if not supabase_available or not supabase_service:
+            raise HTTPException(status_code=503, detail="Database service unavailable")
+        
+        user = supabase_service.get_user(user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        user_image_url = user.get('image_url')
+        voice_id = user.get('voice_id')
+        gender = user.get('gender')
+        
+        if not user_image_url or not voice_id or not gender:
+            raise HTTPException(status_code=400, detail="User missing required data (image_url, voice_id, gender)")
+        
+        # Start scenario generation in background
+        asyncio.create_task(generate_scenario_content_simple(user_id, user_image_url, voice_id, gender))
+        
+        return {
+            "message": f"Scenario generation started for user {user_id}",
+            "status": "in_progress",
+            "user_data": {
+                "name": user.get('name'),
+                "gender": gender,
+                "pre_generation_status": user.get('pre_generation_status', 'pending')
+            }
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error triggering scenario generation: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to trigger scenario generation: {str(e)}")
+
+@app.post("/api/start-scenario-generation")
+async def start_scenario_generation(request: dict):
+    """Start scenario pre-generation during deepfake introduction"""
+    try:
+        voice_id = request.get("voiceId")
+        if not voice_id:
+            raise HTTPException(status_code=400, detail="voiceId is required")
+        
+        if not supabase_available or not supabase_service:
+            print("⚠️ Supabase not available - skipping scenario generation")
+            return {"message": "Scenario generation skipped - database not available", "status": "skipped"}
+        
+        # Get user by voice_id
+        user = supabase_service.get_user_by_voice_id(voice_id)
+        if not user:
+            raise HTTPException(status_code=404, detail=f"User not found with voice_id: {voice_id}")
+        
+        user_id = user['id']
+        user_image_url = user.get('image_url')
+        gender = user.get('gender')
+        
+        if not user_image_url or not gender:
+            raise HTTPException(status_code=400, detail="User missing required data (image_url, gender)")
+        
+        print(f"🚀 Starting scenario generation during deepfake intro for user {user_id}")
+        print(f"   - Voice ID: {voice_id}")
+        print(f"   - Gender: {gender}")
+        print(f"   - Image URL: {user_image_url[:50]}...")
+        
+        # Start scenario generation in background
+        asyncio.create_task(generate_scenario_content_simple(user_id, user_image_url, voice_id, gender))
+        
+        return {
+            "message": f"Scenario generation started for user {user_id}",
+            "status": "in_progress",
+            "user_data": {
+                "name": user.get('name'),
+                "gender": gender,
+                "pre_generation_status": user.get('pre_generation_status', 'pending')
+            }
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error starting scenario generation: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to start scenario generation: {str(e)}")
+
 @app.post("/api/quiz-answers")
 def create_quiz_answer(quiz_answer: QuizAnswerCreate):
     """Save quiz answers to Supabase"""
@@ -519,16 +603,9 @@ async def complete_onboarding(
         print(f"✅ User created: ID {db_user['id']}")
         print(f"🎉 COMPLETE: Onboarding finished successfully for {name}")
         
-        # Trigger scenario pre-generation immediately during onboarding
+        # Scenario content will be generated after the first talking photo is created
         user_id = db_user["id"]
-        print(f"🚀 STARTING: Scenario pre-generation for user {user_id}")
-        
-        # Use asyncio.create_task to run in background without blocking the response
-        if supabase_available and supabase_service:
-            asyncio.create_task(trigger_scenario_pregeneration(user_id, image_url, voice_id, gender))
-            print(f"✅ Scenario pre-generation task started for user {user_id}")
-        else:
-            print(f"⚠️ Scenario pre-generation skipped - Supabase unavailable")
+        print(f"✅ User {user_id} created. Scenario generation will start after talking photo.")
         
         return {
             "success": True,
@@ -1298,8 +1375,7 @@ async def generate_talking_photo(request: dict):
                                 print("🎉 SUCCESS: Talking Photo generation complete (using CDN).")
                                 print("="*80)
 
-                                # Trigger scenario pre-generation after first talking photo
-                                await trigger_scenario_pregeneration_after_first_talking_photo(user_name, voice_id)
+                                # Note: Scenario pre-generation now triggered during deepfake introduction
 
                                 return {"videoUrl": cloudfront_url}
                                 
@@ -1311,8 +1387,7 @@ async def generate_talking_photo(request: dict):
                             print("🎉 SUCCESS: Using Akool video URL directly.")
                             print("="*80)
                             
-                            # Trigger scenario pre-generation after first talking photo
-                            await trigger_scenario_pregeneration_after_first_talking_photo(user_name, voice_id)
+                            # Note: Scenario pre-generation now triggered during deepfake introduction
                             
                             return {"videoUrl": akool_video_url}
                         
@@ -1320,8 +1395,7 @@ async def generate_talking_photo(request: dict):
                         error_message = status_data.get("error_msg", "Akool video generation failed")
                         print(f"❌ ERROR: {error_message}, using sample video")
                         
-                        # Still trigger scenario pre-generation even with sample video
-                        await trigger_scenario_pregeneration_after_first_talking_photo(user_name, voice_id)
+                        # Note: Scenario pre-generation now triggered during deepfake introduction
                         
                         return {
                             "videoUrl": sample_video_url,
@@ -1341,8 +1415,7 @@ async def generate_talking_photo(request: dict):
         print(f"   - Extended timeout: {extended_timeout}")
         print("!"*80)
         
-        # Still trigger scenario pre-generation even with timeout sample video
-        await trigger_scenario_pregeneration_after_first_talking_photo(user_name, voice_id)
+        # Note: Scenario pre-generation now triggered during deepfake introduction
         
         return {
             "videoUrl": sample_video_url,
@@ -1483,7 +1556,7 @@ async def generate_caricature_with_dalle3(features_description: str, prompt_deta
         caricature_prompt = f"""Professional caricature portrait of a Korean person based on:
 {features_description}
 
-Style: Modern cartoon caricature, Disney-Pixar inspired, vibrant colors, clean lines
+Style: Modern cartoon caricature, Disney-Pixar inspired, full color with vibrant natural skin tones, clean lines
 Background: Pure white (#FFFFFF), no shadows or objects
 Composition: Head, neck, and shoulders included, single person, centered frame
 Ethnicity: Korean facial features and characteristics
@@ -1636,148 +1709,146 @@ async def generate_faceswap_video(request: dict):
 # ===================================================================================
 # HYBRID STRATEGY ENDPOINTS
 # ===================================================================================
-
-# Import hybrid services
-try:
-    from .hybrid_api_endpoints import (
-        initialize_hybrid_services, start_scenario_pregeneration_endpoint,
-        smart_narration_endpoint, get_scenario_status_endpoint, 
-        get_cache_stats_endpoint, cleanup_cache_endpoint
-    )
-    from .hybrid_models import SmartNarrationRequest
-    
-    # Initialize hybrid services if supabase is available
-    if supabase_available and supabase_service:
-        initialize_hybrid_services(supabase_service, "http://localhost:8000")
-        print("✅ Hybrid services initialized successfully")
-        print("📍 Creating FULL smart-narration endpoint with SmartNarrationRequest")
-        
-        # Define hybrid endpoints only when services are available
-        @app.post("/api/smart-narration")
-        async def smart_narration(request: SmartNarrationRequest):
-            """Smart narration with caching and preloading"""
-            try:
-                return await smart_narration_endpoint(request)
-            except Exception as e:
-                print(f"❌ Smart narration error: {e}")
-                # Fallback to regular narration
-                try:
-                    legacy_result = await generate_narration({
-                        "script": request.current_script,
-                        "voiceId": request.voice_id
-                    })
-                    return {
-                        "current_audio_url": f"data:audio/mpeg;base64,{legacy_result['audioData']}",
-                        "current_audio_type": legacy_result["audioType"],
-                        "cache_hit": False,
-                        "preload_started": False,
-                        "message": "Fallback to legacy narration"
-                    }
-                except Exception as fallback_error:
-                    raise HTTPException(status_code=500, detail=f"Smart narration failed: {str(e)}")
-    else:
-        print("⚠️ Hybrid services not initialized - Supabase unavailable")
-        print("📍 Creating FALLBACK smart-narration endpoint with BasicSmartNarrationRequest")
-        
-        # Define fallback endpoints when services are not available  
-        # Need to create a basic request model for the fallback
-        from pydantic import BaseModel
-        
-        class BasicSmartNarrationRequest(BaseModel):
-            user_id: int
-            current_step_id: str
-            current_script: str
-            voice_id: str
-            preload_next_step_id: Optional[str] = None
-            preload_next_script: Optional[str] = None
-        
-        @app.post("/api/smart-narration")
-        async def smart_narration_fallback(request: BasicSmartNarrationRequest):
-            """Fallback smart narration endpoint when hybrid services unavailable"""
-            try:
-                legacy_result = await generate_narration({
-                    "script": request.current_script,
-                    "voiceId": request.voice_id
-                })
-                return {
-                    "current_audio_url": f"data:audio/mpeg;base64,{legacy_result['audioData']}",
-                    "current_audio_type": legacy_result["audioType"],
-                    "cache_hit": False,
-                    "preload_started": False,
-                    "message": "Using legacy narration (hybrid services unavailable)"
-                }
-            except Exception as fallback_error:
-                raise HTTPException(status_code=500, detail=f"Narration failed: {str(fallback_error)}")
-
-    @app.get("/api/scenario-status/{user_id}")
-    async def get_scenario_status(user_id: int):
-        """Get scenario generation status for user"""
-        try:
-            return await get_scenario_status_endpoint(user_id)
-        except Exception as e:
-            print(f"❌ Scenario status error: {e}")
-            return {"status": "unknown", "error": str(e)}
-
-    @app.get("/api/cache-stats/{user_id}")
-    async def get_cache_stats(user_id: int):
-        """Get narration cache statistics for user"""
-        try:
-            return await get_cache_stats_endpoint(user_id)
-        except Exception as e:
-            print(f"❌ Cache stats error: {e}")
-            return {"error": str(e)}
-
-    @app.post("/api/cleanup-cache")
-    async def cleanup_cache():
-        """Clean up expired cache entries"""
-        try:
-            return await cleanup_cache_endpoint()
-        except Exception as e:
-            print(f"❌ Cache cleanup error: {e}")
-            return {"error": str(e)}
-
-except Exception as e:
-    print(f"⚠️ Warning: Hybrid services failed to initialize: {e}")
-    # Endpoints are already defined conditionally in the try block above
-    pass
-
-# Trigger scenario pre-generation after caricature completion
-async def trigger_scenario_pregeneration_after_first_talking_photo(user_name: str, voice_id: str):
-    """Trigger scenario pre-generation after first talking photo is complete"""
+# Simple scenario status endpoint
+@app.get("/api/scenario-status/{user_id}")
+async def get_scenario_status(user_id: int):
+    """Get scenario generation status for user"""
     try:
         if not supabase_available or not supabase_service:
-            print("⚠️ Scenario pre-generation skipped - Supabase unavailable")
-            return
-            
-        # Find user by voice_id since that's unique and available
-        user = supabase_service.get_user_by_voice_id(voice_id)
+            return {"status": "unknown", "error": "Database unavailable"}
+        
+        user = supabase_service.get_user(user_id)
         if not user:
-            print(f"⚠️ User not found with voice_id {voice_id} for scenario pre-generation")
-            return
+            return {"status": "user_not_found"}
             
-        user_id = user['id']
-        user_image_url = user['image_url']
-        gender = user['gender']
-        
-        print(f"🚀 First talking photo complete - triggering scenario pre-generation for user {user_id}")
-        
-        # Use asyncio.create_task to run in background without blocking the response
-        asyncio.create_task(trigger_scenario_pregeneration(user_id, user_image_url, voice_id, gender))
-        
+        return {
+            'status': user.get('pre_generation_status', 'pending'),
+            'started_at': user.get('pre_generation_started_at'),
+            'completed_at': user.get('pre_generation_completed_at'),
+            'error': user.get('pre_generation_error'),
+            'pre_generation_urls': {
+                'lottery_faceswap_url': user.get('lottery_faceswap_url'),
+                'crime_faceswap_url': user.get('crime_faceswap_url'),
+                'lottery_video_url': user.get('lottery_video_url'),
+                'crime_video_url': user.get('crime_video_url'),
+                'investment_call_audio_url': user.get('investment_call_audio_url'),
+                'accident_call_audio_url': user.get('accident_call_audio_url')
+            }
+        }
     except Exception as e:
-        print(f"❌ Error triggering scenario pre-generation after talking photo: {e}")
+        print(f"❌ Scenario status error: {e}")
+        return {"status": "unknown", "error": str(e)}
 
-async def trigger_scenario_pregeneration(user_id: int, user_image_url: str, voice_id: str, gender: str):
-    """Trigger scenario pre-generation in background"""
+# Trigger scenario pre-generation after caricature completion
+
+async def generate_scenario_content_simple(user_id: int, user_image_url: str, voice_id: str, gender: str):
+    """Generate scenario content using existing functions"""
     try:
-        if supabase_available and supabase_service:
-            result = await start_scenario_pregeneration_endpoint(user_id, user_image_url, voice_id, gender)
-            if result and result.get("status") == "in_progress":
-                print(f"✅ Scenario pre-generation started for user {user_id}")
-            else:
-                print(f"⚠️ Scenario pre-generation failed to start for user {user_id}")
+        print(f"🎭 Starting direct scenario generation for user {user_id}")
+        
+        # Update user status to in_progress
+        supabase_service.update_user(user_id, {'pre_generation_status': 'in_progress'})
+        print(f"✅ User {user_id} status updated to 'in_progress'")
+        
+        # Scenario configuration
+        scenarios = {
+            'lottery': {
+                'base_image': f'https://d3srmxrzq4dz1v.cloudfront.net/video-url/fakenews-case1-{gender.lower()}.png',
+                'script': '1등 당첨돼서 정말 기뻐요! 감사합니다!'
+            },
+            'crime': {
+                'base_image': f'https://d3srmxrzq4dz1v.cloudfront.net/video-url/fakenews-case2-{gender.lower()}.png',
+                'script': '제가 한 거 아니에요... 찍지 마세요. 죄송합니다…'
+            }
+        }
+        
+        # Voice dub configurations  
+        voice_dubs = {
+            'investment_call_audio': 'https://d3srmxrzq4dz1v.cloudfront.net/video-url/voice1.mp3',
+            'accident_call_audio': 'https://d3srmxrzq4dz1v.cloudfront.net/video-url/voice2.mp3'
+        }
+        
+        generated_urls = {}
+        
+        # Generate face swaps and talking photos using existing functions
+        for scenario_key, config in scenarios.items():
+            try:
+                print(f"🎭 Generating {scenario_key} scenario...")
+                
+                # Use existing generate_faceswap_image function
+                faceswap_result = await generate_faceswap_image({
+                    "userImageUrl": user_image_url,
+                    "baseImageUrl": config['base_image']
+                })
+                
+                faceswap_url = faceswap_result.get('resultUrl')
+                if faceswap_url:
+                    # Save faceswap URL 
+                    generated_urls[f'{scenario_key}_faceswap_url'] = faceswap_url
+                    print(f"✅ Face swap completed: {faceswap_url}")
+                    
+                    # Use existing generate_talking_photo function
+                    talking_photo_result = await generate_talking_photo({
+                        "caricatureUrl": faceswap_url,
+                        "userName": "User",
+                        "voiceId": voice_id,
+                        "audioScript": config['script'],
+                        "scenarioType": scenario_key
+                    })
+                    
+                    video_url = talking_photo_result.get('videoUrl')
+                    if video_url:
+                        # Frontend expects lottery_video_url and crime_video_url
+                        generated_urls[f'{scenario_key}_video_url'] = video_url
+                        print(f"✅ Talking photo completed: {video_url}")
+                    else:
+                        print(f"⚠️ Talking photo failed for {scenario_key}")
+                else:
+                    print(f"⚠️ Face swap failed for {scenario_key}")
+                        
+            except Exception as e:
+                print(f"❌ Error generating {scenario_key}: {e}")
+        
+        # Generate voice dubs using existing function
+        for dub_key, source_url in voice_dubs.items():
+            try:
+                print(f"🎙️ Generating {dub_key}...")
+                
+                # Use existing generate_voice_dub function
+                voice_dub_result = await generate_voice_dub({
+                    "audioUrl": source_url,
+                    "voiceId": voice_id,
+                    "scenarioType": dub_key.replace('_audio', '')
+                })
+                
+                audio_data = voice_dub_result.get('audioData')
+                if audio_data:
+                    # Frontend expects investment_call_audio_url and accident_call_audio_url
+                    generated_urls[f'{dub_key}_url'] = f"data:audio/mp3;base64,{audio_data}"
+                    print(f"✅ Voice dub completed: {dub_key}")
+                else:
+                    print(f"⚠️ Voice dub failed for {dub_key}")
+                        
+            except Exception as e:
+                print(f"❌ Error generating {dub_key}: {e}")
+        
+        # Save all generated URLs to user record
+        if generated_urls:
+            generated_urls['pre_generation_status'] = 'completed'
+            supabase_service.update_user(user_id, generated_urls)
+            print(f"✅ Scenario generation completed for user {user_id}. Generated {len(generated_urls)-1} items.")
         else:
-            print("⚠️ Scenario pre-generation skipped - Supabase unavailable")
+            supabase_service.update_user(user_id, {
+                'pre_generation_status': 'failed',
+                'pre_generation_error': 'No content was generated successfully'
+            })
+            print(f"❌ Scenario generation failed for user {user_id} - no content generated")
+            
     except Exception as e:
-        print(f"❌ Error starting scenario pre-generation: {e}")
+        print(f"❌ Error in scenario generation for user {user_id}: {e}")
+        supabase_service.update_user(user_id, {
+            'pre_generation_status': 'failed',
+            'pre_generation_error': str(e)
+        })
+
 
