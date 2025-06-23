@@ -3,7 +3,15 @@ import uuid
 import asyncio
 import time
 import re
+import warnings
+import logging
 from datetime import datetime, timezone
+
+# Suppress Vercel's asyncio deprecation warning
+warnings.filterwarnings("ignore", category=DeprecationWarning, message=".*loop argument is deprecated.*")
+
+# Reduce httpx logging noise (set to WARNING to only show actual issues)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 from fastapi import FastAPI, HTTPException, File, UploadFile, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -1038,16 +1046,32 @@ async def generate_voice_dub(request: dict):
         
         print(f"🔄 STEP 3: Polling for dubbing completion")
         
-        # Poll for completion (max 5 minutes)
-        max_attempts = 60  # 5 minutes with 5-second intervals
+        # Optimized polling based on expected duration
+        expected_duration = max(dubbed.expected_duration_sec, 10)  # At least 10 seconds
+        initial_wait = min(expected_duration * 0.8, 30)  # Wait 80% of expected time, max 30s
+        
+        print(f"  - Expected duration: {expected_duration}s, initial wait: {initial_wait}s")
+        
+        # Initial wait before first poll
+        await asyncio.sleep(initial_wait)
+        
+        # Then poll with increasing intervals
+        max_attempts = 20  # Reduced from 60
         for attempt in range(max_attempts):
             if attempt > 0:
-                await asyncio.sleep(5)
+                # Progressive intervals: 5s, 10s, 15s, then 15s
+                interval = min(5 + (attempt * 5), 15)
+                await asyncio.sleep(interval)
             
-            print(f"  - Polling attempt {attempt + 1}/{max_attempts}")
+            # Only log every few attempts to reduce noise
+            if attempt % 3 == 0 or attempt < 3:
+                print(f"  - Polling attempt {attempt + 1}/{max_attempts}")
             
             status_response = elevenlabs_client.dubbing.get(dubbed.dubbing_id)
-            print(f"  - Status: {status_response.status}")
+            
+            # Only log status changes or every few attempts
+            if attempt % 3 == 0 or attempt < 3:
+                print(f"  - Status: {status_response.status}")
             
             if status_response.status == "dubbed":
                 print(f"✅ STEP 4: Dubbing completed! Retrieving audio")
@@ -1381,29 +1405,8 @@ async def generate_talking_photo(request: dict):
             "audio_url": audio_url
         }
         
-        # Validate URLs before sending to Akool
+        # Skip URL validation - Akool validates URLs internally
         print("\n" + "-"*80)
-        # Validating URLs and calling Akool API
-        
-        # Test if URLs are accessible
-        try:
-            # Testing URL accessibility
-            async with httpx.AsyncClient(timeout=30.0) as test_client:
-                # Test caricature URL
-                caricature_response = await test_client.head(caricature_url)
-                print(f"  - Caricature URL status: {caricature_response.status_code}")
-                
-                # Test audio URL  
-                audio_response = await test_client.head(audio_url)
-                print(f"  - Audio URL status: {audio_response.status_code}")
-                
-                if caricature_response.status_code != 200:
-                    raise HTTPException(status_code=400, detail=f"Caricature URL not accessible: {caricature_response.status_code}")
-                if audio_response.status_code != 200:
-                    raise HTTPException(status_code=400, detail=f"Audio URL not accessible: {audio_response.status_code}")
-        except Exception as url_error:
-            print(f"⚠️  URL validation failed: {url_error}")
-            print("  - Proceeding anyway, but this may cause Akool job failure")
         
         print(f"  - Endpoint: POST https://openapi.akool.com/api/open/v3/content/video/createbytalkingphoto")
         print(f"  - Payload: {json.dumps(akool_payload, indent=2)}")
