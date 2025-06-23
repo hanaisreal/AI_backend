@@ -580,39 +580,135 @@ async def start_scenario_generation(request: dict):
         print(f"   - Image URL: {user_image_url[:50]}...")
         print("🎬 Starting background scenario generation task...")
         
-        # Start with just one face swap to test (Vercel serverless limitation)
+        # Complete scenario generation flow (synchronous for Vercel)
         try:
-            print("🚀 STARTING: Face swap generation only (testing)")
+            print("🚀 STARTING: Complete scenario generation")
             
-            # Generate just one face swap for testing
-            faceswap_result = await generate_faceswap_image({
-                "userImageUrl": user_image_url,
-                "baseImageUrl": f'https://d3srmxrzq4dz1v.cloudfront.net/video-url/fakenews-case1-{gender.lower()}.png'
+            # Update status to in_progress
+            supabase_service.update_user(user_id, {
+                "pre_generation_status": "in_progress",
+                "pre_generation_started_at": "now()"
             })
             
-            if faceswap_result and faceswap_result.get('resultUrl'):
-                print(f"✅ FACE SWAP SUCCESS: {faceswap_result['resultUrl']}")
-                # Save to database
-                supabase_service.update_user(user_id, {
-                    "lottery_faceswap_url": faceswap_result['resultUrl'],
-                    "scenario_generation_status": "partial"
-                })
-            else:
-                print("❌ FACE SWAP FAILED: No result URL")
+            # PHASE 1: Generate face swaps (lottery + crime)
+            print("🔥 PHASE_1: Starting face swap generation (lottery + crime)")
+            
+            scenarios = {
+                'lottery': f'https://d3srmxrzq4dz1v.cloudfront.net/video-url/fakenews-case1-{gender.lower()}.png',
+                'crime': f'https://d3srmxrzq4dz1v.cloudfront.net/video-url/fakenews-case2-{gender.lower()}.png'
+            }
+            
+            generated_content = {}
+            
+            # Generate face swaps sequentially (to avoid timeout)
+            for scenario_key, base_image_url in scenarios.items():
+                print(f"🔄 Generating {scenario_key} face swap...")
+                try:
+                    faceswap_result = await generate_faceswap_image({
+                        "userImageUrl": user_image_url,
+                        "baseImageUrl": base_image_url
+                    })
+                    
+                    if faceswap_result and faceswap_result.get('resultUrl'):
+                        generated_content[f'{scenario_key}_faceswap_url'] = faceswap_result['resultUrl']
+                        print(f"✅ {scenario_key} face swap completed")
+                    else:
+                        print(f"❌ {scenario_key} face swap failed")
+                        
+                except Exception as faceswap_error:
+                    print(f"❌ {scenario_key} face swap error: {faceswap_error}")
+            
+            # PHASE 2: Generate talking photos from face swaps
+            print("🔥 PHASE_2: Starting talking photo generation")
+            
+            scenario_scripts = {
+                'lottery': '1등 당첨돼서 정말 기뻐요! 감사합니다!',
+                'crime': '제가 한 거 아니에요... 찍지 마세요. 죄송합니다…'
+            }
+            
+            for scenario_key in scenarios.keys():
+                faceswap_url = generated_content.get(f'{scenario_key}_faceswap_url')
+                if faceswap_url:
+                    print(f"🔄 Generating {scenario_key} talking photo...")
+                    try:
+                        talking_result = await generate_talking_photo({
+                            "caricatureUrl": faceswap_url,
+                            "userName": user_name,
+                            "voiceId": voice_id,
+                            "audioScript": scenario_scripts[scenario_key],
+                            "scenarioType": scenario_key,
+                            "extendedTimeout": True
+                        })
+                        
+                        if talking_result and talking_result.get('videoUrl'):
+                            generated_content[f'{scenario_key}_video_url'] = talking_result['videoUrl']
+                            print(f"✅ {scenario_key} talking photo completed")
+                        else:
+                            print(f"❌ {scenario_key} talking photo failed")
+                            
+                    except Exception as talking_error:
+                        print(f"❌ {scenario_key} talking photo error: {talking_error}")
+            
+            # PHASE 3: Generate voice dubs for module 2
+            print("🔥 PHASE_3: Starting voice dub generation")
+            
+            voice_sources = {
+                'investment_call_audio': 'https://d3srmxrzq4dz1v.cloudfront.net/video-url/voice1.mp3',
+                'accident_call_audio': 'https://d3srmxrzq4dz1v.cloudfront.net/video-url/voice2.mp3'
+            }
+            
+            for dub_key, source_url in voice_sources.items():
+                print(f"🔄 Generating {dub_key}...")
+                try:
+                    voice_result = await generate_voice_dub({
+                        "audioUrl": source_url,
+                        "voiceId": voice_id,
+                        "scenarioType": dub_key.replace('_audio', '')
+                    })
+                    
+                    if voice_result and voice_result.get('audioData'):
+                        # For now, store as data URL - could upload to S3 later
+                        audio_data_url = f"data:audio/mpeg;base64,{voice_result['audioData']}"
+                        generated_content[dub_key + '_url'] = audio_data_url
+                        print(f"✅ {dub_key} completed")
+                    else:
+                        print(f"❌ {dub_key} failed")
+                        
+                except Exception as voice_error:
+                    print(f"❌ {dub_key} error: {voice_error}")
+            
+            # Save all generated content to database
+            print("💾 Saving all generated content to database...")
+            generated_content['pre_generation_status'] = 'completed'
+            generated_content['pre_generation_completed_at'] = 'now()'
+            
+            supabase_service.update_user(user_id, generated_content)
+            print(f"✅ COMPLETE: Generated {len(generated_content)} items")
                 
         except Exception as e:
-            print(f"🚨 FACE SWAP TEST FAILED: {type(e).__name__}: {str(e)}")
+            print(f"🚨 SCENARIO GENERATION FAILED: {type(e).__name__}: {str(e)}")
             import traceback
             print(f"🚨 FULL TRACEBACK: {traceback.format_exc()}")
+            
+            # Update status to failed
+            try:
+                supabase_service.update_user(user_id, {
+                    "pre_generation_status": "failed",
+                    "pre_generation_error": str(e),
+                    "pre_generation_completed_at": "now()"
+                })
+            except Exception as db_error:
+                print(f"Failed to update status to failed: {db_error}")
+                
             return {
-                "message": f"Face swap test failed: {str(e)}",
+                "message": f"Scenario generation failed for user {user_id}: {str(e)}",
                 "status": "failed",
                 "error": str(e)
             }
         
         return {
-            "message": f"Scenario generation started for user {user_id}",
-            "status": "in_progress",
+            "message": f"Scenario generation completed for user {user_id}",
+            "status": "completed",
             "user_data": {
                 "name": user.get('name'),
                 "gender": gender,
@@ -990,22 +1086,11 @@ async def generate_faceswap_image(request: dict):
         print("\n" + "-"*80)
         print("🔍 STEP 2: Get or detect face opts for user image")
         
-        # Try to get cached face opts from database first
+        # Skip face opts caching for now (column doesn't exist in current schema)
         user_image_opts = None
-        if supabase_available and supabase_service:
-            try:
-                # Find user by image URL to get cached face opts
-                users_result = supabase_service.client.table('users').select('id, face_opts').eq('image_url', user_image_url).execute()
-                if users_result.data:
-                    cached_opts = users_result.data[0].get('face_opts')
-                    if cached_opts:
-                        user_image_opts = cached_opts
-                        pass  # Using cached face opts
-            except Exception as cache_error:
-                print(f"  - ⚠️ Cache lookup failed: {cache_error}")
         
-        # If no cached opts, detect face in user image
-        if not user_image_opts:
+        # Always detect face in user image (no caching until face_opts column is added)
+        if True:
             print(f"  - 🔄 No cached face opts found, detecting face...")
             import httpx
             async with httpx.AsyncClient(timeout=60.0) as client:
@@ -1024,12 +1109,9 @@ async def generate_faceswap_image(request: dict):
                 if not user_image_opts:
                     raise HTTPException(status_code=400, detail="No face detected in user image")
                 
-                # Try to cache the face opts (optional)
-                if supabase_available and supabase_service:
-                    try:
-                        supabase_service.client.table('users').update({'face_opts': user_image_opts}).eq('image_url', user_image_url).execute()
-                    except Exception:
-                        pass  # Caching failed, continue
+                # Skip face opts caching (column doesn't exist yet)
+                # TODO: Add face_opts column to users table for caching
+                pass
         
         # Submit high-quality face swap job
         
