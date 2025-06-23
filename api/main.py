@@ -1055,10 +1055,91 @@ async def generate_faceswap_image(request: dict):
             
             if result_url:
                 # Face swap completed immediately
-                pass
+                print(f"✅ Face swap completed immediately")
             else:
-                # For now, return an error since we need to implement polling
-                raise HTTPException(status_code=202, detail="Face swap job submitted but polling not implemented yet")
+                # Need to poll for completion
+                if not task_id:
+                    raise HTTPException(status_code=500, detail="No task ID returned from Akool for face swap job")
+                
+                print(f"⏳ Face swap job submitted for polling. Task ID: {task_id}")
+                print(f"  - Job will be polled for completion...")
+                
+                # Polling configuration - using same pattern as talking photo
+                polling_intervals = [5, 10, 15, 20, 30, 30, 30, 30, 30, 30, 30, 30]  # ~5 minutes total
+                
+                # Give Akool time to initialize the job
+                await asyncio.sleep(5)
+                
+                for attempt, interval in enumerate(polling_intervals):
+                    if attempt > 0:  # Skip sleep on first attempt since we already waited 5 seconds
+                        await asyncio.sleep(interval)
+                        print(f"  - Next poll in {polling_intervals[attempt] if attempt < len(polling_intervals)-1 else 30}s")
+                    
+                    # Status check endpoint for face swap
+                    status_url = f"https://openapi.akool.com/api/open/v3/faceswap/highquality/specifyimage/status?task_id={task_id}"
+                    print(f"\n[Face Swap Polling - Attempt {attempt + 1}/{len(polling_intervals)}]")
+                    print(f"  - Calling: GET {status_url}")
+                    
+                    polling_headers = {"Authorization": f"Bearer {akool_auth_token}"}
+                    
+                    async with httpx.AsyncClient(timeout=30.0) as status_client:
+                        try:
+                            status_response = await status_client.get(status_url, headers=polling_headers)
+                            
+                            if status_response.status_code == 200:
+                                status_data = status_response.json()
+                                
+                                if status_data.get("code") == 1000:
+                                    job_data = status_data.get("data", {})
+                                    job_status = job_data.get("status")  # Could be: queuing, processing, completed, failed
+                                    
+                                    print(f"  - Job Status: {job_status}")
+                                    
+                                    if job_status in ["queuing", "processing"]:
+                                        print(f"  - Status: {job_status.title()}...")
+                                        continue  # Keep polling
+                                    
+                                    elif job_status == "completed":
+                                        # Face swap completed successfully
+                                        result_url = job_data.get("url") or job_data.get("result_url")
+                                        if result_url:
+                                            print(f"✅ Face swap completed successfully")
+                                            break
+                                        else:
+                                            print(f"⚠️ Face swap marked complete but no result URL")
+                                            continue
+                                    
+                                    elif job_status == "failed":
+                                        # Face swap failed
+                                        error_message = job_data.get("error_msg", "Face swap job failed")
+                                        print(f"❌ Face swap failed: {error_message}")
+                                        raise HTTPException(status_code=500, detail=f"Face swap failed: {error_message}")
+                                    
+                                    else:
+                                        print(f"⚠️ Unknown job status: {job_status}")
+                                        continue
+                                        
+                                else:
+                                    print(f"  - API Error: {status_data.get('msg', 'Unknown error')}")
+                                    continue
+                                    
+                            else:
+                                print(f"  - Received non-200 status on poll: {status_response.status_code}")
+                                if attempt == len(polling_intervals) - 1:
+                                    raise HTTPException(status_code=500, detail="Face swap polling failed")
+                                continue
+                                
+                        except httpx.TimeoutException:
+                            print(f"  - Polling request timed out")
+                            if attempt == len(polling_intervals) - 1:
+                                raise HTTPException(status_code=500, detail="Face swap polling timed out")
+                            continue
+                
+                # If we exit the loop without getting a result, job timed out
+                if not result_url:
+                    print(f"⏰ TIMEOUT: Face swap job timed out after 5 minutes")
+                    print(f"💡 Consider implementing fallback sample image for better user experience")
+                    raise HTTPException(status_code=500, detail="Face swap job timed out - please try again later")
         
         # Handle result URL
         
@@ -1802,7 +1883,7 @@ async def generate_scenario_content_simple(user_id: int, user_image_url: str, vo
                         "userImageUrl": user_image_url,
                         "baseImageUrl": config['base_image']
                     }),
-                    timeout=300  # 5 minutes timeout for face swap
+                    timeout=360  # 6 minutes timeout for face swap (allows for 5-minute polling + buffer)
                 )
                 
                 faceswap_url = faceswap_result.get('resultUrl')
@@ -1880,7 +1961,7 @@ async def generate_scenario_content_simple(user_id: int, user_image_url: str, vo
                         "voiceId": voice_id,
                         "scenarioType": dub_key.replace('_audio', '')
                     }),
-                    timeout=180  # 3 minutes timeout for voice dub
+                    timeout=360  # 6 minutes timeout for voice dub (matches 5-minute polling + buffer)
                 )
                 
                 # Fix: Check for the correct response format from voice dub API
