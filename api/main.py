@@ -1869,17 +1869,29 @@ async def generate_scenario_content_simple(user_id: int, user_image_url: str, vo
                     # Handle S3 upload if we have binary audio data
                     try:
                         audio_bytes = base64.b64decode(voice_result['audioData'])
-                        # Use existing S3 service to upload audio
+                        # Use direct S3 client upload (same as talking photo) to ensure proper permissions
                         timestamp = int(time.time())
                         audio_filename = f"voice_dub_{dub_key}_{user_id}_{timestamp}.mp3"
-                        s3_audio_url = s3_service.upload_file(
-                            audio_bytes, 
-                            'audio/mpeg', 
-                            'voice_dubs', 
-                            audio_filename
+                        audio_object_name = f"voice_dubs/{audio_filename}"
+                        
+                        # Create temporary file-like object for S3 upload
+                        from io import BytesIO
+                        audio_file = BytesIO(audio_bytes)
+                        audio_file.name = audio_filename
+                        
+                        # Upload using direct S3 client with explicit permissions (same as talking photo)
+                        if not s3_client:
+                            raise Exception("S3 client not available")
+                        s3_client.upload_fileobj(
+                            audio_file,
+                            S3_BUCKET_NAME,
+                            audio_object_name,
+                            ExtraArgs={'ACL': 'public-read', 'ContentType': 'audio/mpeg'}
                         )
-                        final_url = s3_audio_url
-                        log_progress(f"AUDIO_{dub_key.upper()}", "Generated and uploaded to S3", "SUCCESS")
+                        
+                        # Use CloudFront CDN URL for faster audio delivery
+                        final_url = f"https://{CLOUDFRONT_DOMAIN}/{audio_object_name}"
+                        log_progress(f"AUDIO_{dub_key.upper()}", "Generated and uploaded to S3 (direct method)", "SUCCESS")
                     except Exception as s3_error:
                         log_progress(f"AUDIO_{dub_key.upper()}", "S3 upload failed, using base64 fallback", "ERROR")
                         audio_type = voice_result.get('audioType', 'audio/mpeg')
@@ -2021,5 +2033,175 @@ async def generate_scenario_content_simple(user_id: int, user_image_url: str, vo
             log_progress("ERROR_STATUS", "Database updated with fatal error", "SAVE")
         except Exception as db_error:
             log_progress("ERROR_STATUS", f"Could not update database: {db_error}", "ERROR")
+
+@app.post("/api/fix-voice-dub-permissions/{user_id}")
+async def fix_voice_dub_permissions(user_id: int):
+    """Fix S3 permissions for existing voice dub audio files"""
+    try:
+        if not supabase_available or not supabase_service:
+            raise HTTPException(status_code=503, detail="Database service unavailable")
+        
+        if not s3_client:
+            raise HTTPException(status_code=503, detail="S3 client not available")
+        
+        user = supabase_service.get_user(user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        print(f"🔧 STARTING: Fix voice dub permissions for user {user_id}")
+        
+        # Get the current voice dub URLs
+        investment_url = user.get('investment_call_audio_url')
+        accident_url = user.get('accident_call_audio_url')
+        
+        fixed_urls = {}
+        errors = []
+        
+        def extract_s3_key_from_url(url: str) -> str:
+            """Extract S3 key from CloudFront or S3 URL"""
+            if not url:
+                return None
+            # Remove CloudFront domain and extract the key
+            if CLOUDFRONT_DOMAIN in url:
+                return url.split(f"https://{CLOUDFRONT_DOMAIN}/")[-1]
+            elif ".amazonaws.com" in url:
+                # Handle direct S3 URLs
+                parts = url.split(".amazonaws.com/")
+                if len(parts) > 1:
+                    return parts[1]
+            return None
+        
+        def fix_s3_object_permissions(s3_key: str, url_type: str):
+            """Fix permissions for a single S3 object by copying to new location with proper permissions"""
+            try:
+                print(f"  🔧 Fixing permissions for {url_type}: {s3_key}")
+                
+                # First, try to update ACL directly
+                try:
+                    s3_client.put_object_acl(
+                        Bucket=S3_BUCKET_NAME,
+                        Key=s3_key,
+                        ACL='public-read'
+                    )
+                    new_url = f"https://{CLOUDFRONT_DOMAIN}/{s3_key}"
+                    print(f"  ✅ Fixed permissions via ACL for {url_type}")
+                    return new_url
+                    
+                except Exception as acl_error:
+                    print(f"  ⚠️ ACL method failed ({acl_error}), trying copy method...")
+                    
+                    # If ACL update fails (bucket blocks public ACLs), copy object with new permissions
+                    # Generate new filename with timestamp
+                    timestamp = int(time.time())
+                    path_parts = s3_key.split('/')
+                    original_filename = path_parts[-1]
+                    folder = '/'.join(path_parts[:-1])
+                    
+                    # Create new filename
+                    name_parts = original_filename.rsplit('.', 1)
+                    if len(name_parts) == 2:
+                        new_filename = f"{name_parts[0]}_fixed_{timestamp}.{name_parts[1]}"
+                    else:
+                        new_filename = f"{original_filename}_fixed_{timestamp}"
+                    
+                    new_s3_key = f"{folder}/{new_filename}"
+                    
+                    # Copy object with public-read permissions
+                    copy_source = {'Bucket': S3_BUCKET_NAME, 'Key': s3_key}
+                    
+                    s3_client.copy_object(
+                        CopySource=copy_source,
+                        Bucket=S3_BUCKET_NAME,
+                        Key=new_s3_key,
+                        MetadataDirective='COPY',
+                        ACL='public-read'
+                    )
+                    
+                    new_url = f"https://{CLOUDFRONT_DOMAIN}/{new_s3_key}"
+                    print(f"  ✅ Fixed permissions via copy for {url_type}: {new_s3_key}")
+                    return new_url
+                
+            except Exception as e:
+                error_msg = f"Failed to fix permissions for {url_type}: {str(e)}"
+                print(f"  ❌ {error_msg}")
+                errors.append(error_msg)
+                return None
+        
+        # Fix investment call audio permissions
+        if investment_url:
+            investment_key = extract_s3_key_from_url(investment_url)
+            if investment_key:
+                new_investment_url = fix_s3_object_permissions(investment_key, "investment_call_audio")
+                if new_investment_url:
+                    fixed_urls['investment_call_audio_url'] = new_investment_url
+            else:
+                errors.append("Could not extract S3 key from investment_call_audio_url")
+        else:
+            errors.append("No investment_call_audio_url found in user data")
+        
+        # Fix accident call audio permissions
+        if accident_url:
+            accident_key = extract_s3_key_from_url(accident_url)
+            if accident_key:
+                new_accident_url = fix_s3_object_permissions(accident_key, "accident_call_audio")
+                if new_accident_url:
+                    fixed_urls['accident_call_audio_url'] = new_accident_url
+            else:
+                errors.append("Could not extract S3 key from accident_call_audio_url")
+        else:
+            errors.append("No accident_call_audio_url found in user data")
+        
+        # Update database with any fixed URLs
+        if fixed_urls:
+            try:
+                supabase_service.update_user(user_id, fixed_urls)
+                print(f"  ✅ Updated database with {len(fixed_urls)} fixed URLs")
+            except Exception as db_error:
+                error_msg = f"Failed to update database: {str(db_error)}"
+                print(f"  ❌ {error_msg}")
+                errors.append(error_msg)
+        
+        # Test accessibility of fixed URLs
+        accessible_urls = {}
+        if fixed_urls:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                for url_type, url in fixed_urls.items():
+                    try:
+                        response = await client.head(url)
+                        accessible_urls[url_type] = {
+                            "url": url,
+                            "status_code": response.status_code,
+                            "accessible": response.status_code == 200
+                        }
+                        print(f"  🔍 {url_type} accessibility test: {response.status_code}")
+                    except Exception as test_error:
+                        accessible_urls[url_type] = {
+                            "url": url,
+                            "status_code": None,
+                            "accessible": False,
+                            "error": str(test_error)
+                        }
+                        print(f"  ❌ {url_type} accessibility test failed: {test_error}")
+        
+        print(f"🔧 COMPLETED: Voice dub permission fix for user {user_id}")
+        print(f"  - Fixed URLs: {len(fixed_urls)}")
+        print(f"  - Errors: {len(errors)}")
+        
+        return {
+            "success": len(fixed_urls) > 0,
+            "user_id": user_id,
+            "fixed_urls": fixed_urls,
+            "accessibility_tests": accessible_urls,
+            "errors": errors,
+            "summary": {
+                "total_urls_processed": len([u for u in [investment_url, accident_url] if u]),
+                "urls_fixed": len(fixed_urls),
+                "errors_count": len(errors)
+            }
+        }
+        
+    except Exception as e:
+        print(f"❌ Error fixing voice dub permissions: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to fix voice dub permissions: {str(e)}")
 
 
