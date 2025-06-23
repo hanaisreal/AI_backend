@@ -186,19 +186,24 @@ class SupabaseService:
     def update_user(self, user_id: int, update_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Update user data"""
         try:
-            # Add updated_at timestamp
-            update_data['updated_at'] = 'NOW()'
-            result = self.client.table('users').update(update_data).eq('id', user_id).execute()
+            # Don't modify the original dict
+            safe_update_data = update_data.copy()
+            
+            # Remove updated_at for now to avoid SQL function issues
+            if 'updated_at' in safe_update_data:
+                del safe_update_data['updated_at']
+            
+            result = self.client.table('users').update(safe_update_data).eq('id', user_id).execute()
+            
             return result.data[0] if result.data else None
         except Exception as e:
-            print(f"❌ Error updating user: {e}")
+            print(f"❌ DB_ERROR: Failed to update user {user_id}: {e}")
             raise
     
     def update_user_progress(self, user_id: int, progress_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Update user progress"""
         try:
-            print(f"🔄 BACKEND: Updating user {user_id} progress")
-            print(f"   - Raw progress data: {progress_data}")
+            # Clean progress update without verbose logging
             
             update_data = {}
             if 'currentPage' in progress_data:

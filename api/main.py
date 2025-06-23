@@ -3,6 +3,7 @@ import uuid
 import asyncio
 import time
 import re
+from datetime import datetime, timezone
 from fastapi import FastAPI, HTTPException, File, UploadFile, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -461,17 +462,126 @@ async def start_scenario_generation(request: dict):
         user_id = user['id']
         user_image_url = user.get('image_url')
         gender = user.get('gender')
+        # Use existing database field name (until migration is run)
+        current_status = user.get('pre_generation_status', 'pending')
         
         if not user_image_url or not gender:
             raise HTTPException(status_code=400, detail="User missing required data (image_url, gender)")
         
-        print(f"🚀 Starting scenario generation during deepfake intro for user {user_id}")
+        # BACKEND GUARD: Check if scenario generation is already completed, in progress, or recently triggered
+        if current_status == 'completed':
+            print(f"🛑 BACKEND GUARD: Scenario generation already COMPLETED for user {user_id}")
+            print(f"   - Status: {current_status}")
+            print("   - Skipping duplicate generation to prevent credit waste")
+            return {
+                "message": f"Scenario generation already completed for user {user_id}",
+                "status": "already_completed",
+                "user_data": {
+                    "name": user.get('name'),
+                    "gender": gender,
+                    "pre_generation_status": current_status
+                }
+            }
+        
+        if current_status == 'in_progress':
+            # Check if the process has been running for too long (stuck prevention)
+            started_at = user.get('pre_generation_started_at')
+            current_time = datetime.now()
+            
+            if started_at:
+                if isinstance(started_at, str):
+                    # Parse ISO format datetime string
+                    try:
+                        started_dt = datetime.fromisoformat(started_at.replace('Z', '+00:00'))
+                    except:
+                        started_dt = datetime.fromisoformat(started_at)
+                else:
+                    started_dt = started_at
+                
+                # Convert to timezone-aware if needed
+                if started_dt.tzinfo is None:
+                    started_dt = started_dt.replace(tzinfo=timezone.utc)
+                if current_time.tzinfo is None:
+                    current_time = current_time.replace(tzinfo=timezone.utc)
+                    
+                time_running = (current_time - started_dt).total_seconds() / 60  # minutes
+                
+                # If running for more than 20 minutes, consider it stuck and allow restart
+                if time_running > 20:
+                    print(f"⚠️ BACKEND GUARD: Process appears stuck (running {time_running:.1f} minutes)")
+                    print(f"   - Allowing restart for user {user_id}")
+                else:
+                    print(f"🛑 BACKEND GUARD: Scenario generation IN PROGRESS for user {user_id}")
+                    print(f"   - Status: {current_status} (running {time_running:.1f} minutes)")
+                    print("   - Skipping duplicate generation to prevent credit waste")
+                    return {
+                        "message": f"Scenario generation already in progress for user {user_id} ({time_running:.1f} min)",
+                        "status": "already_in_progress",
+                        "user_data": {
+                            "name": user.get('name'),
+                            "gender": gender,
+                            "pre_generation_status": current_status
+                        }
+                    }
+            else:
+                print(f"🛑 BACKEND GUARD: Scenario generation IN PROGRESS for user {user_id}")
+                print(f"   - Status: {current_status} (no start time recorded)")
+                print("   - Skipping duplicate generation to prevent credit waste")
+                return {
+                    "message": f"Scenario generation already in progress for user {user_id}",
+                    "status": "already_in_progress",
+                    "user_data": {
+                        "name": user.get('name'),
+                        "gender": gender,
+                        "pre_generation_status": current_status
+                    }
+                }
+        
+        # BACKEND GUARD: Check for rapid successive calls when status is 'pending'
+        if current_status == 'pending':
+            last_updated = user.get('updated_at')
+            if last_updated:
+                if isinstance(last_updated, str):
+                    try:
+                        last_updated_dt = datetime.fromisoformat(last_updated.replace('Z', '+00:00'))
+                    except:
+                        last_updated_dt = datetime.fromisoformat(last_updated)
+                else:
+                    last_updated_dt = last_updated
+                
+                # Convert to timezone-aware if needed
+                if last_updated_dt.tzinfo is None:
+                    last_updated_dt = last_updated_dt.replace(tzinfo=timezone.utc)
+                
+                current_time = datetime.now(timezone.utc)
+                time_since_update = (current_time - last_updated_dt).total_seconds()
+                
+                # Prevent rapid successive calls (less than 10 seconds apart)
+                if time_since_update < 10:
+                    print(f"🛑 BACKEND GUARD: Rapid successive call detected for user {user_id}")
+                    print(f"   - Status: {current_status} (last updated {time_since_update:.1f}s ago)")
+                    print("   - Preventing rapid duplicate calls")
+                    return {
+                        "message": f"Please wait before retrying (last call {time_since_update:.1f}s ago)",
+                        "status": "rate_limited",
+                        "user_data": {
+                            "name": user.get('name'),
+                            "gender": gender,
+                            "pre_generation_status": current_status
+                        }
+                    }
+        
+        print("🚀 SCENARIO GENERATION TRIGGER CALLED from DeepfakeIntroduction page")
+        print(f"   - User ID: {user_id}")
         print(f"   - Voice ID: {voice_id}")
         print(f"   - Gender: {gender}")
+        print(f"   - Current Status: {current_status}")
         print(f"   - Image URL: {user_image_url[:50]}...")
+        print("🎬 Starting background scenario generation task...")
         
         # Start scenario generation in background
         asyncio.create_task(generate_scenario_content_simple(user_id, user_image_url, voice_id, gender))
+        print("✅ Background task created successfully")
         
         return {
             "message": f"Scenario generation started for user {user_id}",
@@ -807,11 +917,7 @@ async def generate_faceswap_image(request: dict):
     base_image_url = request.get("baseImageUrl", "")
     user_image_url = request.get("userImageUrl", "")
     
-    print("\n" + "="*80)
-    print("🔄 STARTING: Generate Face Swap Image (High Quality)")
-    print(f"  - Base Image URL: {base_image_url}")
-    print(f"  - User Image URL: {user_image_url}")
-    print("="*80)
+    # Generate face swap image (logging handled by scenario generation)
     
     # Get valid Akool token
     try:
@@ -832,31 +938,26 @@ async def generate_faceswap_image(request: dict):
         # Load face swap configuration
         import json
         import os
-        config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "face_swap_config.json")
+        config_path = os.path.join(os.path.dirname(__file__), "face_swap_config.json")
         with open(config_path, 'r', encoding='utf-8') as f:
             config = json.load(f)
         
-        print("\n" + "-"*80)
-        print("🔍 STEP 1: Get base image face opts from config")
+        # Load face swap configuration
         
         # Find base image configuration
         base_image_config = None
         for key, img_config in config["base_images"].items():
             if img_config["url"] == base_image_url:
                 base_image_config = img_config
-                print(f"  - Found config for: {key}")
+                # Config found for base image
                 break
         
         if not base_image_config:
-            print(f"❌ ERROR: Base image not found in config: {base_image_url}")
             raise HTTPException(status_code=400, detail="Base image not configured")
         
         base_image_opts = base_image_config.get("opts", "")
         if not base_image_opts:
-            print(f"❌ ERROR: Face opts not configured for base image")
             raise HTTPException(status_code=400, detail="Face opts not configured for base image. Please run detect API first.")
-        
-        print(f"  - Base image opts: {base_image_opts}")
         
         print("\n" + "-"*80)
         print("🔍 STEP 2: Get or detect face opts for user image")
@@ -871,7 +972,7 @@ async def generate_faceswap_image(request: dict):
                     cached_opts = users_result.data[0].get('face_opts')
                     if cached_opts:
                         user_image_opts = cached_opts
-                        print(f"  - ✅ Using cached face opts: {user_image_opts}")
+                        pass  # Using cached face opts
             except Exception as cache_error:
                 print(f"  - ⚠️ Cache lookup failed: {cache_error}")
         
@@ -886,31 +987,23 @@ async def generate_faceswap_image(request: dict):
                     json={"image_url": user_image_url}
                 )
                 
-                print(f"  - Detect API status: {detect_response.status_code}")
-                
                 if detect_response.status_code != 200:
-                    print(f"❌ ERROR: Face detection failed: {detect_response.text}")
                     raise HTTPException(status_code=500, detail="Face detection failed")
                 
                 detect_data = detect_response.json()
                 user_image_opts = detect_data.get("landmarks_str", "")
                 
                 if not user_image_opts:
-                    print(f"❌ ERROR: No face detected in user image")
                     raise HTTPException(status_code=400, detail="No face detected in user image")
                 
-                print(f"  - ✅ Detected face opts: {user_image_opts}")
-                
-                # Cache the face opts in database for future use
+                # Try to cache the face opts (optional)
                 if supabase_available and supabase_service:
                     try:
                         supabase_service.client.table('users').update({'face_opts': user_image_opts}).eq('image_url', user_image_url).execute()
-                        print(f"  - 💾 Cached face opts for future use")
-                    except Exception as cache_error:
-                        print(f"  - ⚠️ Failed to cache face opts: {cache_error}")
+                    except Exception:
+                        pass  # Caching failed, continue
         
-        print("\n" + "-"*80)
-        print("🎭 STEP 3: Submit high-quality face swap job")
+        # Submit high-quality face swap job
         
         # Submit face swap job using high-quality API
         async with httpx.AsyncClient(timeout=120.0) as client:
@@ -941,18 +1034,15 @@ async def generate_faceswap_image(request: dict):
                 json=faceswap_payload
             )
             
-            print(f"  - Response status: {response.status_code}")
-            print(f"  - Response: {response.text}")
+            # Check response status
             
             if response.status_code != 200:
-                print(f"❌ ERROR: Akool API returned {response.status_code}")
                 raise HTTPException(status_code=500, detail=f"Akool API error: {response.status_code}")
             
             response_data = response.json()
             
             if response_data.get("code") != 1000:
                 error_msg = response_data.get("msg", "Unknown Akool error")
-                print(f"❌ ERROR: Akool API error: {error_msg}")
                 raise HTTPException(status_code=500, detail=f"Akool error: {error_msg}")
             
             # Check if result is immediately available or needs polling
@@ -962,97 +1052,21 @@ async def generate_faceswap_image(request: dict):
             task_id = data.get("_id")
             
             if result_url:
-                print(f"✅ Face swap completed immediately! Result URL: {result_url}")
+                # Face swap completed immediately
+                pass
             else:
-                print(f"⏳ Face swap job queued, job_id: {job_id}, task_id: {task_id}")
                 # For now, return an error since we need to implement polling
                 raise HTTPException(status_code=202, detail="Face swap job submitted but polling not implemented yet")
         
-        print("\n" + "-"*80)
-        print("📁 STEP 4: Handle result URL")
-        print(f"  - Akool result URL: {result_url}")
+        # Handle result URL
         
-        # Try multiple approaches to access the image
-        image_data = None
-        s3_url = None
+        # Use Akool CDN URL directly (download attempts always fail with 403)
+        final_url = result_url
         
-        # Approach 1: Try downloading with various authentication methods
-        download_attempts = [
-            # Method 1: Standard headers
-            {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Accept": "image/*,*/*;q=0.8",
-                "Referer": "https://openapi.akool.com/"
-            },
-            # Method 2: With Akool authorization
-            {
-                "Authorization": f"Bearer {akool_auth_token}",
-                "User-Agent": "Akool-Client/1.0",
-                "Accept": "image/*"
-            },
-            # Method 3: Simple browser-like request
-            {
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-                "Accept-Language": "en-US,en;q=0.5",
-                "Cache-Control": "no-cache"
-            }
-        ]
+        # Log only the final result
+        print(f"✅ FaceSwap result: {final_url}")
         
-        for i, headers in enumerate(download_attempts, 1):
-            try:
-                print(f"  - Attempt {i}: Trying download with method {i}")
-                async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
-                    download_response = await client.get(result_url, headers=headers)
-                    print(f"    Status: {download_response.status_code}")
-                    
-                    if download_response.status_code == 200:
-                        image_data = download_response.content
-                        if len(image_data) > 0:
-                            print(f"    ✅ Successfully downloaded {len(image_data)} bytes")
-                            break
-                        else:
-                            print(f"    ⚠️ Downloaded but data is empty")
-                    else:
-                        print(f"    ❌ Failed with status {download_response.status_code}")
-                        
-            except Exception as e:
-                print(f"    ❌ Error in attempt {i}: {e}")
-                continue
-        
-        # If download failed, use the Akool URL directly
-        if not image_data or len(image_data) == 0:
-            print("⚠️ All download attempts failed. Using Akool URL directly.")
-            print(f"  - This means the image will be served from Akool's CDN")
-            s3_url = result_url  # Use Akool URL directly
-        else:
-            # Upload to our S3
-            try:
-                print(f"  - Uploading {len(image_data)} bytes to S3...")
-                
-                # Determine file extension
-                if result_url.lower().endswith('.png'):
-                    file_ext = 'png'
-                    mime_type = 'image/png'
-                else:
-                    file_ext = 'jpg'
-                    mime_type = 'image/jpeg'
-                
-                filename = f"faceswap_result_{uuid.uuid4().hex[:8]}.{file_ext}"
-                s3_url = s3_service.upload_file(image_data, mime_type, "faceswap", filename)
-                print(f"✅ Face swap image stored in S3: {s3_url}")
-                
-            except Exception as e:
-                print(f"❌ S3 upload failed: {e}")
-                print("  - Falling back to Akool URL")
-                s3_url = result_url
-        
-        print("\n" + "="*80)
-        print("🎉 Face swap generation completed!")
-        print(f"  - Final URL: {s3_url}")
-        print("="*80)
-        
-        return {"resultUrl": s3_url}
+        return {"resultUrl": final_url}
         
     except Exception as e:
         print(f"❌ Error generating faceswap image: {e}")
@@ -1069,12 +1083,7 @@ async def generate_talking_photo(request: dict):
     extended_timeout = request.get("extendedTimeout", False)  # For pre-generation with longer timeout
     
     print("\n" + "="*80)
-    print("🎬 STARTING: Generate Talking Photo")
-    print(f"  - Caricature URL: {caricature_url}")
-    print(f"  - User Name: {user_name}")
-    print(f"  - Voice ID: {voice_id}")
-    print(f"  - Audio Script: {audio_script}")
-    print("="*80)
+    # Generate talking photo (logging handled by scenario generation)
 
     # Get valid Akool token
     try:
@@ -1084,19 +1093,12 @@ async def generate_talking_photo(request: dict):
         raise HTTPException(status_code=500, detail="Akool authentication failed.")
     
     if not caricature_url:
-        print("❌ ERROR: Caricature URL is required.")
         raise HTTPException(status_code=400, detail="Caricature URL is required.")
-        
     if not user_name:
-        print("❌ ERROR: User name is required.")
         raise HTTPException(status_code=400, detail="User name is required.")
-        
     if not voice_id:
-        print("❌ ERROR: Voice ID is required.")
         raise HTTPException(status_code=400, detail="Voice ID is required.")
-        
     if not elevenlabs_client:
-        print("❌ ERROR: ElevenLabs client not initialized.")
         raise HTTPException(status_code=500, detail="ElevenLabs client not initialized.")
     
     try:
@@ -1109,10 +1111,7 @@ async def generate_talking_photo(request: dict):
             print(f"  - Using default script: {korean_script}")
         
         print("\n" + "-"*80)
-        print("🎙️ STEP 1: Generate personalized audio with ElevenLabs")
-        print(f"  - Script: {korean_script}")
-        print(f"  - Voice ID: {voice_id}")
-        print("-"*80)
+        # Generate personalized audio with ElevenLabs
         
         # Generate speech using ElevenLabs with the cloned voice
         audio_stream = elevenlabs_client.text_to_speech.convert(
@@ -1173,13 +1172,11 @@ async def generate_talking_photo(request: dict):
         
         # Validate URLs before sending to Akool
         print("\n" + "-"*80)
-        print("🚀 STEP 2: Validating URLs and calling Akool API")
-        print(f"  - Caricature URL: {caricature_url}")
-        print(f"  - Audio URL: {audio_url}")
+        # Validating URLs and calling Akool API
         
         # Test if URLs are accessible
         try:
-            print("📋 Testing URL accessibility...")
+            # Testing URL accessibility
             async with httpx.AsyncClient(timeout=30.0) as test_client:
                 # Test caricature URL
                 caricature_response = await test_client.head(caricature_url)
@@ -1494,7 +1491,7 @@ Keep each point under 15 words. Focus on what makes this face unique for caricat
 
 {visual_description}
 
-This analysis will be used to create a stylized black and white caricature suitable for educational purposes about AI-generated content."""
+This analysis will be used to create a stylized colorful caricature suitable for educational purposes about AI-generated content."""
                 
                 return {
                     "facialFeatures": {
@@ -1742,13 +1739,33 @@ async def get_scenario_status(user_id: int):
 # Trigger scenario pre-generation after caricature completion
 
 async def generate_scenario_content_simple(user_id: int, user_image_url: str, voice_id: str, gender: str):
-    """Generate scenario content using existing functions"""
+    """Generate scenario content using existing functions - robust version that saves partial results"""
+    
+    def log_progress(step: str, message: str, status: str = "INFO"):
+        """Clean progress logging with consistent format"""
+        status_icon = {
+            "START": "🚀",
+            "SUCCESS": "✅", 
+            "ERROR": "❌",
+            "SAVE": "💾",
+            "INFO": "ℹ️",
+            "PHASE": "🔥"
+        }.get(status, "•")
+        print(f"[USER {user_id}] {status_icon} {step}: {message}")
+    
     try:
-        print(f"🎭 Starting direct scenario generation for user {user_id}")
+        log_progress("SCENARIO_GEN", "Starting background scenario generation", "START")
+        log_progress("SETUP", f"Gender: {gender}, Voice: {voice_id[:8]}...", "INFO")
         
-        # Update user status to in_progress
-        supabase_service.update_user(user_id, {'pre_generation_status': 'in_progress'})
-        print(f"✅ User {user_id} status updated to 'in_progress'")
+        # Update user status to in_progress with timestamp
+        try:
+            supabase_service.update_user(user_id, {
+                'pre_generation_status': 'in_progress',
+                'pre_generation_started_at': datetime.now(timezone.utc).isoformat()
+            })
+            log_progress("DB_UPDATE", "Status set to 'in_progress'", "SAVE")
+        except Exception as status_error:
+            log_progress("DB_ERROR", f"Could not update status: {status_error}", "ERROR")
         
         # Scenario configuration
         scenarios = {
@@ -1769,13 +1786,14 @@ async def generate_scenario_content_simple(user_id: int, user_image_url: str, vo
         }
         
         generated_urls = {}
+        generation_errors = []
         
-        # Generate face swaps and talking photos using existing functions
-        for scenario_key, config in scenarios.items():
+        # Helper functions for concurrent execution with partial saves
+        async def generate_faceswap_with_save(scenario_key: str, config: dict):
+            """Generate face swap and save immediately"""
             try:
-                print(f"🎭 Generating {scenario_key} scenario...")
+                log_progress(f"FACESWAP_{scenario_key.upper()}", "Starting generation", "INFO")
                 
-                # Use existing generate_faceswap_image function
                 faceswap_result = await generate_faceswap_image({
                     "userImageUrl": user_image_url,
                     "baseImageUrl": config['base_image']
@@ -1783,72 +1801,224 @@ async def generate_scenario_content_simple(user_id: int, user_image_url: str, vo
                 
                 faceswap_url = faceswap_result.get('resultUrl')
                 if faceswap_url:
-                    # Save faceswap URL 
-                    generated_urls[f'{scenario_key}_faceswap_url'] = faceswap_url
-                    print(f"✅ Face swap completed: {faceswap_url}")
+                    log_progress(f"FACESWAP_{scenario_key.upper()}", "Generation completed", "SUCCESS")
                     
-                    # Use existing generate_talking_photo function
-                    talking_photo_result = await generate_talking_photo({
-                        "caricatureUrl": faceswap_url,
-                        "userName": "User",
-                        "voiceId": voice_id,
-                        "audioScript": config['script'],
-                        "scenarioType": scenario_key
-                    })
+                    # Save partial result immediately
+                    try:
+                        partial_update = {f'{scenario_key}_faceswap_url': faceswap_url}
+                        supabase_service.update_user(user_id, partial_update)
+                        log_progress(f"FACESWAP_{scenario_key.upper()}", "URL saved to database", "SAVE")
+                    except Exception as save_error:
+                        log_progress(f"FACESWAP_{scenario_key.upper()}", f"Save failed: {save_error}", "ERROR")
                     
-                    video_url = talking_photo_result.get('videoUrl')
-                    if video_url:
-                        # Frontend expects lottery_video_url and crime_video_url
-                        generated_urls[f'{scenario_key}_video_url'] = video_url
-                        print(f"✅ Talking photo completed: {video_url}")
-                    else:
-                        print(f"⚠️ Talking photo failed for {scenario_key}")
+                    return scenario_key, faceswap_url, config
                 else:
-                    print(f"⚠️ Face swap failed for {scenario_key}")
-                        
+                    raise Exception(f"No resultUrl in faceswap response: {faceswap_result}")
+                    
             except Exception as e:
-                print(f"❌ Error generating {scenario_key}: {e}")
-        
-        # Generate voice dubs using existing function
-        for dub_key, source_url in voice_dubs.items():
-            try:
-                print(f"🎙️ Generating {dub_key}...")
+                log_progress(f"FACESWAP_{scenario_key.upper()}", f"Failed: {str(e)}", "ERROR")
+                return scenario_key, None, config
                 
-                # Use existing generate_voice_dub function
-                voice_dub_result = await generate_voice_dub({
+        async def generate_talking_photo_with_save(scenario_key: str, faceswap_url: str, config: dict):
+            """Generate talking photo and save immediately"""
+            try:
+                log_progress(f"VIDEO_{scenario_key.upper()}", f"Starting with script: '{config['script'][:30]}...'", "INFO")
+                
+                talking_result = await generate_talking_photo({
+                    "caricatureUrl": faceswap_url,
+                    "userName": f"User-{user_id}",  
+                    "voiceId": voice_id,
+                    "audioScript": config['script'],
+                    "scenarioType": scenario_key
+                })
+                
+                video_url = talking_result.get('videoUrl')
+                if video_url:
+                    log_progress(f"VIDEO_{scenario_key.upper()}", "Generation completed", "SUCCESS")
+                    
+                    # Save partial result immediately
+                    try:
+                        partial_update = {f'{scenario_key}_video_url': video_url}
+                        supabase_service.update_user(user_id, partial_update)
+                        log_progress(f"VIDEO_{scenario_key.upper()}", "URL saved to database", "SAVE")
+                    except Exception as save_error:
+                        log_progress(f"VIDEO_{scenario_key.upper()}", f"Save failed: {save_error}", "ERROR")
+                    
+                    return scenario_key, video_url
+                else:
+                    raise Exception(f"No videoUrl in talking photo response: {talking_result}")
+                    
+            except Exception as e:
+                log_progress(f"VIDEO_{scenario_key.upper()}", f"Failed: {str(e)}", "ERROR")
+                return scenario_key, None
+                
+        async def generate_voice_dub_with_save(dub_key: str, source_url: str):
+            """Generate voice dub and save immediately"""
+            try:
+                log_progress(f"AUDIO_{dub_key.upper()}", "Starting voice dubbing", "INFO")
+                
+                voice_result = await generate_voice_dub({
                     "audioUrl": source_url,
                     "voiceId": voice_id,
                     "scenarioType": dub_key.replace('_audio', '')
                 })
                 
-                audio_data = voice_dub_result.get('audioData')
-                if audio_data:
-                    # Frontend expects investment_call_audio_url and accident_call_audio_url
-                    generated_urls[f'{dub_key}_url'] = f"data:audio/mp3;base64,{audio_data}"
-                    print(f"✅ Voice dub completed: {dub_key}")
+                # Fix: Check for the correct response format from voice dub API
+                if voice_result and 'audioData' in voice_result:
+                    # Handle S3 upload if we have binary audio data
+                    try:
+                        audio_bytes = base64.b64decode(voice_result['audioData'])
+                        # Use existing S3 service to upload audio
+                        timestamp = int(time.time())
+                        audio_filename = f"voice_dub_{dub_key}_{user_id}_{timestamp}.mp3"
+                        s3_audio_url = s3_service.upload_file(
+                            audio_bytes, 
+                            'audio/mpeg', 
+                            'voice_dubs', 
+                            audio_filename
+                        )
+                        final_url = s3_audio_url
+                        log_progress(f"AUDIO_{dub_key.upper()}", "Generated and uploaded to S3", "SUCCESS")
+                    except Exception as s3_error:
+                        log_progress(f"AUDIO_{dub_key.upper()}", "S3 upload failed, using base64 fallback", "ERROR")
+                        audio_type = voice_result.get('audioType', 'audio/mpeg')
+                        final_url = f"data:{audio_type};base64,{voice_result['audioData']}"
+                        log_progress(f"AUDIO_{dub_key.upper()}", "Generated (base64 fallback)", "SUCCESS")
+                    
+                    # Save partial result immediately
+                    try:
+                        partial_update = {f'{dub_key}_url': final_url}
+                        supabase_service.update_user(user_id, partial_update)
+                        log_progress(f"AUDIO_{dub_key.upper()}", "URL saved to database", "SAVE")
+                    except Exception as save_error:
+                        log_progress(f"AUDIO_{dub_key.upper()}", f"Save failed: {save_error}", "ERROR")
+                    
+                    return dub_key, final_url
                 else:
-                    print(f"⚠️ Voice dub failed for {dub_key}")
-                        
+                    raise Exception(f"Voice dub failed or returned invalid format: {voice_result}")
+                    
             except Exception as e:
-                print(f"❌ Error generating {dub_key}: {e}")
+                log_progress(f"AUDIO_{dub_key.upper()}", f"Failed: {str(e)}", "ERROR")
+                return dub_key, None
         
-        # Save all generated URLs to user record
+        log_progress("PHASE_1", "Starting concurrent face swap generation (lottery + crime)", "PHASE")
+        
+        # Phase 1: Generate face swaps concurrently
+        faceswap_tasks = [
+            generate_faceswap_with_save(scenario_key, config) 
+            for scenario_key, config in scenarios.items()
+        ]
+        
+        faceswap_results = await asyncio.gather(*faceswap_tasks, return_exceptions=True)
+        
+        # Process face swap results
+        successful_faceswaps = []
+        for result in faceswap_results:
+            if isinstance(result, Exception):
+                generation_errors.append(f"Face swap exception: {str(result)}")
+                log_progress("PHASE_1", f"Exception caught: {result}", "ERROR")
+            elif result and len(result) == 3:
+                scenario_key, faceswap_url, config = result
+                if faceswap_url:
+                    successful_faceswaps.append((scenario_key, faceswap_url, config))
+                    generated_urls[f'{scenario_key}_faceswap_url'] = faceswap_url
+                else:
+                    generation_errors.append(f"Face swap failed for {scenario_key}")
+        
+        log_progress("PHASE_1", f"Completed: {len(successful_faceswaps)}/2 face swaps successful", "INFO")
+        
+        log_progress("PHASE_2", "Starting concurrent videos + audio (up to 4 tasks)", "PHASE")
+        
+        # Phase 2: Generate talking photos and voice dubs concurrently
+        concurrent_tasks = []
+        
+        # Add talking photo tasks (using successful face swaps)
+        for scenario_key, faceswap_url, config in successful_faceswaps:
+            task = generate_talking_photo_with_save(scenario_key, faceswap_url, config)
+            concurrent_tasks.append(('talking_photo', task))
+        
+        # Add voice dub tasks (independent of face swaps)
+        for dub_key, source_url in voice_dubs.items():
+            task = generate_voice_dub_with_save(dub_key, source_url)
+            concurrent_tasks.append(('voice_dub', task))
+        
+        # Execute all tasks concurrently
+        if concurrent_tasks:
+            all_tasks = [task for _, task in concurrent_tasks]
+            all_results = await asyncio.gather(*all_tasks, return_exceptions=True)
+            
+            # Process results
+            phase2_success = 0
+            for i, result in enumerate(all_results):
+                task_type, _ = concurrent_tasks[i]
+                
+                if isinstance(result, Exception):
+                    generation_errors.append(f"{task_type} exception: {str(result)}")
+                    log_progress("PHASE_2", f"{task_type} exception: {result}", "ERROR")
+                elif result and len(result) == 2:
+                    key, url = result
+                    if url:
+                        if task_type == 'talking_photo':
+                            generated_urls[f'{key}_video_url'] = url
+                        else:  # voice_dub
+                            generated_urls[f'{key}_url'] = url
+                        phase2_success += 1
+                    else:
+                        generation_errors.append(f"{task_type} failed for {key}")
+            
+            log_progress("PHASE_2", f"Completed: {phase2_success}/{len(concurrent_tasks)} tasks successful", "INFO")
+        
+        # Summary of generation results
+        log_progress("SUMMARY", f"Generated {len(generated_urls)}/6 total items, {len(generation_errors)} errors", "INFO")
+        
+        # Show what was successfully generated
+        success_items = []
+        for url_key in generated_urls.keys():
+            if 'faceswap' in url_key:
+                success_items.append(f"Face swap: {url_key.replace('_faceswap_url', '')}")
+            elif 'video' in url_key:
+                success_items.append(f"Video: {url_key.replace('_video_url', '')}")
+            elif 'audio' in url_key:
+                success_items.append(f"Audio: {url_key.replace('_url', '')}")
+        
+        if success_items:
+            log_progress("SUCCESS_LIST", ", ".join(success_items), "SUCCESS")
+        
+        # Final status update
+        final_status = 'completed' if len(generation_errors) == 0 else 'partial_success'
+        
         if generated_urls:
-            generated_urls['pre_generation_status'] = 'completed'
-            supabase_service.update_user(user_id, generated_urls)
-            print(f"✅ Scenario generation completed for user {user_id}. Generated {len(generated_urls)-1} items.")
+            # Final status update with error summary
+            try:
+                status_update = {'pre_generation_status': final_status}
+                if generation_errors:
+                    status_update['pre_generation_error'] = f"Partial success: {'; '.join(generation_errors[:3])}"  # Limit error length
+                supabase_service.update_user(user_id, status_update)
+                log_progress("FINAL_STATUS", f"Set to '{final_status}' in database", "SAVE")
+            except Exception as final_error:
+                log_progress("FINAL_STATUS", f"Database update failed: {final_error}", "ERROR")
         else:
-            supabase_service.update_user(user_id, {
-                'pre_generation_status': 'failed',
-                'pre_generation_error': 'No content was generated successfully'
-            })
-            print(f"❌ Scenario generation failed for user {user_id} - no content generated")
+            try:
+                supabase_service.update_user(user_id, {
+                    'pre_generation_status': 'failed',
+                    'pre_generation_error': f"Complete failure: {'; '.join(generation_errors[:3])}"
+                })
+                log_progress("FINAL_STATUS", "Set to 'failed' - no content generated", "ERROR")
+            except Exception as final_error:
+                log_progress("FINAL_STATUS", f"Database update failed: {final_error}", "ERROR")
+                
+        log_progress("SCENARIO_GEN", f"FINISHED - Status: {final_status}, Items: {len(generated_urls)}/6", "SUCCESS")
             
     except Exception as e:
-        print(f"❌ Error in scenario generation for user {user_id}: {e}")
-        supabase_service.update_user(user_id, {
-            'pre_generation_status': 'failed',
-            'pre_generation_error': str(e)
-        })
+        log_progress("FATAL_ERROR", f"Scenario generation crashed: {type(e).__name__}: {str(e)}", "ERROR")
+        
+        try:
+            supabase_service.update_user(user_id, {
+                'pre_generation_status': 'failed',
+                'pre_generation_error': str(e)
+            })
+            log_progress("ERROR_STATUS", "Database updated with fatal error", "SAVE")
+        except Exception as db_error:
+            log_progress("ERROR_STATUS", f"Could not update database: {db_error}", "ERROR")
 
 

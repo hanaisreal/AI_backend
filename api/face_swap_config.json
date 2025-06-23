@@ -1,22 +1,22 @@
 {
   "base_images": {
     "fakenews_lottery_male": {
-      "url": "https://deepfake-videomaking.s3.us-east-1.amazonaws.com/video-url/fakenews-case1-male.png",
+      "url": "https://d3srmxrzq4dz1v.cloudfront.net/video-url/fakenews-case1-male.png",
       "opts": "769,1396:887,1404:821,1475:771,1511",
       "description": "Male holding lottery winning certificate/ticket, happy expression"
     },
     "fakenews_lottery_female": {
-      "url": "https://deepfake-videomaking.s3.us-east-1.amazonaws.com/video-url/fakenews-case1-female.png", 
+      "url": "https://d3srmxrzq4dz1v.cloudfront.net/video-url/fakenews-case1-female.png", 
       "opts": "785,1364:908,1367:848,1437:784,1476",
       "description": "Female holding lottery winning certificate/ticket, happy expression"
     },
     "fakenews_crime_male": {
-      "url": "https://deepfake-videomaking.s3.us-east-1.amazonaws.com/video-url/fakenews-case2-male.png",
+      "url": "https://d3srmxrzq4dz1v.cloudfront.net/video-url/fakenews-case2-male.png",
       "opts": "767,1459:897,1461:823,1538:775,1591",
       "description": "Male being arrested/interrogated (news photo style)"
     },
     "fakenews_crime_female": {
-      "url": "https://deepfake-videomaking.s3.us-east-1.amazonaws.com/video-url/fakenews-case2-female.png",
+      "url": "https://d3srmxrzq4dz1v.cloudfront.net/video-url/fakenews-case2-female.png",
       "opts": "752,1570:869,1565:804,1644:780,1696",
       "description": "Female being arrested/interrogated (news photo style)"
     }
@@ -30,10 +30,10 @@
   "instructions": {
     "step1": "Run these commands to get face opts for each base image:",
     "commands": [
-      "curl -X POST https://sg3.akool.com/detect -H 'Content-Type: application/json' -d '{\"image_url\": \"https://deepfake-videomaking.s3.us-east-1.amazonaws.com/video-url/fakenews-case1-male.png\"}'",
-      "curl -X POST https://sg3.akool.com/detect -H 'Content-Type: application/json' -d '{\"image_url\": \"https://deepfake-videomaking.s3.us-east-1.amazonaws.com/video-url/fakenews-case1-female.png\"}'",
-      "curl -X POST https://sg3.akool.com/detect -H 'Content-Type: application/json' -d '{\"image_url\": \"https://deepfake-videomaking.s3.us-east-1.amazonaws.com/video-url/fakenews-case2-male.png\"}'",
-      "curl -X POST https://sg3.akool.com/detect -H 'Content-Type: application/json' -d '{\"image_url\": \"https://deepfake-videomaking.s3.us-east-1.amazonaws.com/video-url/fakenews-case2-female.png\"}'"
+      "curl -X POST https://sg3.akool.com/detect -H 'Content-Type: application/json' -d '{\"image_url\": \"https://d3srmxrzq4dz1v.cloudfront.net/video-url/fakenews-case1-male.png\"}'",
+      "curl -X POST https://sg3.akool.com/detect -H 'Content-Type: application/json' -d '{\"image_url\": \"https://d3srmxrzq4dz1v.cloudfront.net/video-url/fakenews-case1-female.png\"}'",
+      "curl -X POST https://sg3.akool.com/detect -H 'Content-Type: application/json' -d '{\"image_url\": \"https://d3srmxrzq4dz1v.cloudfront.net/video-url/fakenews-case2-male.png\"}'",
+      "curl -X POST https://sg3.akool.com/detect -H 'Content-Type: application/json' -d '{\"image_url\": \"https://d3srmxrzq4dz1v.cloudfront.net/video-url/fakenews-case2-female.png\"}'"
     ],
     "step2": "Copy the landmarks_str value from each response and paste into the corresponding opts field above"
   }
