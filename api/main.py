@@ -584,11 +584,18 @@ async def start_scenario_generation(request: dict):
         try:
             print("🚀 STARTING: Complete scenario generation")
             
-            # Update status to in_progress
-            supabase_service.update_user(user_id, {
-                "pre_generation_status": "in_progress",
-                "pre_generation_started_at": "now()"
-            })
+            # Get user name from user data
+            user_name = user.get('name', 'User')
+            
+            # Update status to in_progress (with error handling for missing columns)
+            try:
+                supabase_service.update_user(user_id, {
+                    "pre_generation_status": "in_progress"
+                })
+                print("✅ Status updated to in_progress")
+            except Exception as db_error:
+                print(f"⚠️ DB update warning: {db_error}")
+                # Continue even if status update fails
             
             # PHASE 1: Generate face swaps (lottery + crime)
             print("🔥 PHASE_1: Starting face swap generation (lottery + crime)")
@@ -667,10 +674,46 @@ async def start_scenario_generation(request: dict):
                     })
                     
                     if voice_result and voice_result.get('audioData'):
-                        # For now, store as data URL - could upload to S3 later
-                        audio_data_url = f"data:audio/mpeg;base64,{voice_result['audioData']}"
-                        generated_content[dub_key + '_url'] = audio_data_url
-                        print(f"✅ {dub_key} completed")
+                        # Upload voice dub to S3 and get CDN URL
+                        try:
+                            import base64
+                            from io import BytesIO
+                            import time
+                            import uuid
+                            
+                            # Decode base64 audio data
+                            audio_bytes = base64.b64decode(voice_result['audioData'])
+                            
+                            # Create unique filename
+                            timestamp = int(time.time())
+                            safe_user_name = user_name.replace(' ', '_')[:20] if user_name else "user"
+                            audio_filename = f"voice_dub_{dub_key}_{safe_user_name}_{timestamp}_{uuid.uuid4().hex[:6]}.mp3"
+                            audio_object_name = f"voice_dubs/{safe_user_name}/{audio_filename}"
+                            
+                            # Upload to S3
+                            audio_file = BytesIO(audio_bytes)
+                            audio_file.name = audio_filename
+                            
+                            s3_client.upload_fileobj(
+                                audio_file, S3_BUCKET_NAME, audio_object_name,
+                                ExtraArgs={
+                                    'ACL': 'public-read',
+                                    'ContentType': 'audio/mpeg',
+                                    'CacheControl': 'max-age=31536000'
+                                }
+                            )
+                            
+                            # Use CloudFront CDN URL
+                            cdn_url = f"https://{CLOUDFRONT_DOMAIN}/{audio_object_name}"
+                            generated_content[dub_key + '_url'] = cdn_url
+                            print(f"✅ {dub_key} completed - uploaded to CDN: {cdn_url}")
+                            
+                        except Exception as upload_error:
+                            print(f"⚠️ S3 upload failed for {dub_key}: {upload_error}")
+                            # Fallback to base64 data URL
+                            audio_data_url = f"data:audio/mpeg;base64,{voice_result['audioData']}"
+                            generated_content[dub_key + '_url'] = audio_data_url
+                            print(f"✅ {dub_key} completed - using base64 fallback")
                     else:
                         print(f"❌ {dub_key} failed")
                         
@@ -680,10 +723,14 @@ async def start_scenario_generation(request: dict):
             # Save all generated content to database
             print("💾 Saving all generated content to database...")
             generated_content['pre_generation_status'] = 'completed'
-            generated_content['pre_generation_completed_at'] = 'now()'
             
-            supabase_service.update_user(user_id, generated_content)
-            print(f"✅ COMPLETE: Generated {len(generated_content)} items")
+            try:
+                supabase_service.update_user(user_id, generated_content)
+                print(f"✅ COMPLETE: Generated {len(generated_content)} items saved to database")
+            except Exception as db_error:
+                print(f"⚠️ DB save warning: {db_error}")
+                print(f"✅ COMPLETE: Generated {len(generated_content)} items (DB save failed but content generated)")
+                # Don't fail the entire process if DB save fails
                 
         except Exception as e:
             print(f"🚨 SCENARIO GENERATION FAILED: {type(e).__name__}: {str(e)}")
