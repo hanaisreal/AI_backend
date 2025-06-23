@@ -580,25 +580,35 @@ async def start_scenario_generation(request: dict):
         print(f"   - Image URL: {user_image_url[:50]}...")
         print("🎬 Starting background scenario generation task...")
         
-        # Start scenario generation in background with exception logging
-        async def safe_generate_scenario_content():
-            try:
-                print("🚀 SAFE WRAPPER: Starting scenario generation")
-                await generate_scenario_content_simple(user_id, user_image_url, voice_id, gender)
-                print("✅ SAFE WRAPPER: Scenario generation completed successfully")
-            except Exception as e:
-                print(f"🚨 BACKGROUND TASK CRASH: {type(e).__name__}: {str(e)}")
-                import traceback
-                print(f"🚨 FULL TRACEBACK: {traceback.format_exc()}")
-                # Update status to failed in database
-                try:
-                    if supabase_available and supabase_service:
-                        supabase_service.update_user(user_id, {"scenario_generation_status": "failed"})
-                except Exception as db_error:
-                    print(f"Failed to update status to failed: {db_error}")
-        
-        asyncio.create_task(safe_generate_scenario_content())
-        print("✅ Background task created successfully")
+        # Start with just one face swap to test (Vercel serverless limitation)
+        try:
+            print("🚀 STARTING: Face swap generation only (testing)")
+            
+            # Generate just one face swap for testing
+            faceswap_result = await generate_faceswap_image({
+                "userImageUrl": user_image_url,
+                "baseImageUrl": f'https://d3srmxrzq4dz1v.cloudfront.net/video-url/fakenews-case1-{gender.lower()}.png'
+            })
+            
+            if faceswap_result and faceswap_result.get('resultUrl'):
+                print(f"✅ FACE SWAP SUCCESS: {faceswap_result['resultUrl']}")
+                # Save to database
+                supabase_service.update_user(user_id, {
+                    "lottery_faceswap_url": faceswap_result['resultUrl'],
+                    "scenario_generation_status": "partial"
+                })
+            else:
+                print("❌ FACE SWAP FAILED: No result URL")
+                
+        except Exception as e:
+            print(f"🚨 FACE SWAP TEST FAILED: {type(e).__name__}: {str(e)}")
+            import traceback
+            print(f"🚨 FULL TRACEBACK: {traceback.format_exc()}")
+            return {
+                "message": f"Face swap test failed: {str(e)}",
+                "status": "failed",
+                "error": str(e)
+            }
         
         return {
             "message": f"Scenario generation started for user {user_id}",
