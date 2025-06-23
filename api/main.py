@@ -155,6 +155,7 @@ origins = [
     "https://ai-awareness-project.vercel.app",
     "https://ai-frontend-gules.vercel.app",
     "https://ai-frontend-ck6r8pnui-hanaisreals-projects.vercel.app",
+    "https://ai-frontend-4mxmgszte-hanaisreals-projects.vercel.app",
 ]
 
 app.add_middleware(
@@ -1795,10 +1796,14 @@ async def generate_scenario_content_simple(user_id: int, user_image_url: str, vo
             try:
                 log_progress(f"FACESWAP_{scenario_key.upper()}", "Starting generation", "INFO")
                 
-                faceswap_result = await generate_faceswap_image({
-                    "userImageUrl": user_image_url,
-                    "baseImageUrl": config['base_image']
-                })
+                # Add timeout protection for face swap generation
+                faceswap_result = await asyncio.wait_for(
+                    generate_faceswap_image({
+                        "userImageUrl": user_image_url,
+                        "baseImageUrl": config['base_image']
+                    }),
+                    timeout=300  # 5 minutes timeout for face swap
+                )
                 
                 faceswap_url = faceswap_result.get('resultUrl')
                 if faceswap_url:
@@ -1816,6 +1821,9 @@ async def generate_scenario_content_simple(user_id: int, user_image_url: str, vo
                 else:
                     raise Exception(f"No resultUrl in faceswap response: {faceswap_result}")
                     
+            except asyncio.TimeoutError:
+                log_progress(f"FACESWAP_{scenario_key.upper()}", "Timeout after 5 minutes", "ERROR")
+                return scenario_key, None, config
             except Exception as e:
                 log_progress(f"FACESWAP_{scenario_key.upper()}", f"Failed: {str(e)}", "ERROR")
                 return scenario_key, None, config
@@ -1825,13 +1833,17 @@ async def generate_scenario_content_simple(user_id: int, user_image_url: str, vo
             try:
                 log_progress(f"VIDEO_{scenario_key.upper()}", f"Starting with script: '{config['script'][:30]}...'", "INFO")
                 
-                talking_result = await generate_talking_photo({
-                    "caricatureUrl": faceswap_url,
-                    "userName": f"User-{user_id}",  
-                    "voiceId": voice_id,
-                    "audioScript": config['script'],
-                    "scenarioType": scenario_key
-                })
+                # Add timeout protection for talking photo generation
+                talking_result = await asyncio.wait_for(
+                    generate_talking_photo({
+                        "caricatureUrl": faceswap_url,
+                        "userName": f"User-{user_id}",  
+                        "voiceId": voice_id,
+                        "audioScript": config['script'],
+                        "scenarioType": scenario_key
+                    }),
+                    timeout=480  # 8 minutes timeout for talking photo
+                )
                 
                 video_url = talking_result.get('videoUrl')
                 if video_url:
@@ -1849,6 +1861,9 @@ async def generate_scenario_content_simple(user_id: int, user_image_url: str, vo
                 else:
                     raise Exception(f"No videoUrl in talking photo response: {talking_result}")
                     
+            except asyncio.TimeoutError:
+                log_progress(f"VIDEO_{scenario_key.upper()}", "Timeout after 8 minutes", "ERROR")
+                return scenario_key, None
             except Exception as e:
                 log_progress(f"VIDEO_{scenario_key.upper()}", f"Failed: {str(e)}", "ERROR")
                 return scenario_key, None
@@ -1858,11 +1873,15 @@ async def generate_scenario_content_simple(user_id: int, user_image_url: str, vo
             try:
                 log_progress(f"AUDIO_{dub_key.upper()}", "Starting voice dubbing", "INFO")
                 
-                voice_result = await generate_voice_dub({
-                    "audioUrl": source_url,
-                    "voiceId": voice_id,
-                    "scenarioType": dub_key.replace('_audio', '')
-                })
+                # Add timeout protection for voice dub generation
+                voice_result = await asyncio.wait_for(
+                    generate_voice_dub({
+                        "audioUrl": source_url,
+                        "voiceId": voice_id,
+                        "scenarioType": dub_key.replace('_audio', '')
+                    }),
+                    timeout=180  # 3 minutes timeout for voice dub
+                )
                 
                 # Fix: Check for the correct response format from voice dub API
                 if voice_result and 'audioData' in voice_result:
@@ -1910,6 +1929,9 @@ async def generate_scenario_content_simple(user_id: int, user_image_url: str, vo
                 else:
                     raise Exception(f"Voice dub failed or returned invalid format: {voice_result}")
                     
+            except asyncio.TimeoutError:
+                log_progress(f"AUDIO_{dub_key.upper()}", "Timeout after 3 minutes", "ERROR")
+                return dub_key, None
             except Exception as e:
                 log_progress(f"AUDIO_{dub_key.upper()}", f"Failed: {str(e)}", "ERROR")
                 return dub_key, None
@@ -2203,5 +2225,47 @@ async def fix_voice_dub_permissions(user_id: int):
     except Exception as e:
         print(f"❌ Error fixing voice dub permissions: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to fix voice dub permissions: {str(e)}")
+
+@app.get("/api/debug-scenario-generation/{user_id}")
+async def debug_scenario_generation(user_id: int):
+    """Debug endpoint to check scenario generation status and logs"""
+    try:
+        if not supabase_available or not supabase_service:
+            return {"error": "Database service unavailable"}
+        
+        user = supabase_service.get_user(user_id)
+        if not user:
+            return {"error": "User not found"}
+        
+        # Check what URLs have been generated so far
+        scenario_urls = {
+            'lottery_faceswap_url': user.get('lottery_faceswap_url'),
+            'crime_faceswap_url': user.get('crime_faceswap_url'),
+            'lottery_video_url': user.get('lottery_video_url'),
+            'crime_video_url': user.get('crime_video_url'),
+            'investment_call_audio_url': user.get('investment_call_audio_url'),
+            'accident_call_audio_url': user.get('accident_call_audio_url'),
+        }
+        
+        # Count how many are completed
+        completed_count = len([url for url in scenario_urls.values() if url])
+        
+        return {
+            "user_id": user_id,
+            "pre_generation_status": user.get('pre_generation_status', 'unknown'),
+            "pre_generation_error": user.get('pre_generation_error'),
+            "scenario_urls": scenario_urls,
+            "completion_progress": f"{completed_count}/6",
+            "debug_info": {
+                "voice_id": user.get('voice_id'),
+                "image_url": user.get('image_url')[:100] + "..." if user.get('image_url') else None,
+                "gender": user.get('gender'),
+                "created_at": user.get('created_at'),
+                "updated_at": user.get('updated_at')
+            }
+        }
+        
+    except Exception as e:
+        return {"error": f"Debug failed: {str(e)}"}
 
 
