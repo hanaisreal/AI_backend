@@ -580,8 +580,24 @@ async def start_scenario_generation(request: dict):
         print(f"   - Image URL: {user_image_url[:50]}...")
         print("🎬 Starting background scenario generation task...")
         
-        # Start scenario generation in background
-        asyncio.create_task(generate_scenario_content_simple(user_id, user_image_url, voice_id, gender))
+        # Start scenario generation in background with exception logging
+        async def safe_generate_scenario_content():
+            try:
+                print("🚀 SAFE WRAPPER: Starting scenario generation")
+                await generate_scenario_content_simple(user_id, user_image_url, voice_id, gender)
+                print("✅ SAFE WRAPPER: Scenario generation completed successfully")
+            except Exception as e:
+                print(f"🚨 BACKGROUND TASK CRASH: {type(e).__name__}: {str(e)}")
+                import traceback
+                print(f"🚨 FULL TRACEBACK: {traceback.format_exc()}")
+                # Update status to failed in database
+                try:
+                    if supabase_available and supabase_service:
+                        supabase_service.update_user(user_id, {"scenario_generation_status": "failed"})
+                except Exception as db_error:
+                    print(f"Failed to update status to failed: {db_error}")
+        
+        asyncio.create_task(safe_generate_scenario_content())
         print("✅ Background task created successfully")
         
         return {
@@ -2005,7 +2021,22 @@ async def generate_scenario_content_simple(user_id: int, user_image_url: str, vo
             for scenario_key, config in scenarios.items()
         ]
         
-        faceswap_results = await asyncio.gather(*faceswap_tasks, return_exceptions=True)
+        print(f"🔍 CRITICAL DEBUG: About to run asyncio.gather with {len(faceswap_tasks)} tasks")
+        print(f"  - Scenarios: {list(scenarios.keys())}")
+        print(f"  - Task types: {[type(task).__name__ for task in faceswap_tasks]}")
+        
+        try:
+            log_progress("GATHER_START", f"Starting asyncio.gather for {len(faceswap_tasks)} face swap tasks", "INFO")
+            faceswap_results = await asyncio.gather(*faceswap_tasks, return_exceptions=True)
+            log_progress("GATHER_SUCCESS", f"asyncio.gather completed with {len(faceswap_results)} results", "SUCCESS")
+            print(f"🔍 GATHER SUCCESS: Got {len(faceswap_results)} results")
+            print(f"  - Results types: {[type(r).__name__ for r in faceswap_results]}")
+        except Exception as gather_error:
+            log_progress("GATHER_CRASH", f"asyncio.gather failed: {type(gather_error).__name__}: {str(gather_error)}", "ERROR")
+            print(f"🚨 GATHER FAILED: {type(gather_error).__name__}: {str(gather_error)}")
+            import traceback
+            print(f"🚨 GATHER TRACEBACK: {traceback.format_exc()}")
+            raise
         
         # Process face swap results
         successful_faceswaps = []
