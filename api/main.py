@@ -773,7 +773,8 @@ async def generate_narration(request: dict):
             voice_settings={
                 "stability": 0.6,
                 "similarity_boost": 0.7,
-                "speed": 1.1  # 10% faster
+                "speed": 1.10,  # 10% faster
+                "use_speaker_boost": True   # Enhance speaker characteristics
             }
         )
         
