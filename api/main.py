@@ -1053,93 +1053,66 @@ async def generate_faceswap_image(request: dict):
             job_id = data.get("job_id")
             task_id = data.get("_id")
             
+            print(f"\n🔍 DEBUG: Akool response analysis:")
+            print(f"  - Response data keys: {list(response_data.keys())}")
+            print(f"  - Data keys: {list(data.keys()) if data else 'No data object'}")
+            print(f"  - result_url: {result_url}")
+            print(f"  - job_id: {job_id}")
+            print(f"  - task_id: {task_id}")
+            
             if result_url:
                 # Face swap completed immediately
                 print(f"✅ Face swap completed immediately")
             else:
-                # Need to poll for completion
+                # Face swap needs polling - simple implementation
                 if not task_id:
-                    raise HTTPException(status_code=500, detail="No task ID returned from Akool for face swap job")
+                    print(f"❌ No task ID returned from Akool, but this might be normal for immediate results")
+                    raise HTTPException(status_code=500, detail="Face swap failed - no result or task ID")
                 
                 print(f"⏳ Face swap job submitted for polling. Task ID: {task_id}")
-                print(f"  - Job will be polled for completion...")
                 
-                # Polling configuration - using same pattern as talking photo
-                polling_intervals = [5, 10, 15, 20, 30, 30, 30, 30, 30, 30, 30, 30]  # ~5 minutes total
+                # Simple polling - check every 10 seconds for up to 2 minutes
+                max_attempts = 12  # 2 minutes with 10-second intervals
                 
-                # Give Akool time to initialize the job
-                await asyncio.sleep(5)
-                
-                for attempt, interval in enumerate(polling_intervals):
-                    if attempt > 0:  # Skip sleep on first attempt since we already waited 5 seconds
-                        await asyncio.sleep(interval)
-                        print(f"  - Next poll in {polling_intervals[attempt] if attempt < len(polling_intervals)-1 else 30}s")
+                for attempt in range(max_attempts):
+                    await asyncio.sleep(10)  # Wait 10 seconds between checks
                     
-                    # Status check endpoint for face swap
-                    status_url = f"https://openapi.akool.com/api/open/v3/faceswap/highquality/specifyimage/status?task_id={task_id}"
-                    print(f"\n[Face Swap Polling - Attempt {attempt + 1}/{len(polling_intervals)}]")
-                    print(f"  - Calling: GET {status_url}")
+                    print(f"[Face Swap Poll {attempt + 1}/{max_attempts}] Checking status...")
                     
-                    polling_headers = {"Authorization": f"Bearer {akool_auth_token}"}
-                    
-                    async with httpx.AsyncClient(timeout=30.0) as status_client:
-                        try:
-                            status_response = await status_client.get(status_url, headers=polling_headers)
+                    try:
+                        status_url = f"https://openapi.akool.com/api/open/v3/faceswap/highquality/specifyimage/status?task_id={task_id}"
+                        
+                        async with httpx.AsyncClient(timeout=30.0) as status_client:
+                            status_response = await status_client.get(
+                                status_url, 
+                                headers={"Authorization": f"Bearer {akool_auth_token}"}
+                            )
                             
                             if status_response.status_code == 200:
                                 status_data = status_response.json()
                                 
                                 if status_data.get("code") == 1000:
                                     job_data = status_data.get("data", {})
-                                    job_status = job_data.get("status")  # Could be: queuing, processing, completed, failed
+                                    job_status = job_data.get("status")
                                     
-                                    print(f"  - Job Status: {job_status}")
+                                    print(f"  - Status: {job_status}")
                                     
-                                    if job_status in ["queuing", "processing"]:
-                                        print(f"  - Status: {job_status.title()}...")
-                                        continue  # Keep polling
-                                    
-                                    elif job_status == "completed":
-                                        # Face swap completed successfully
+                                    if job_status == "completed":
                                         result_url = job_data.get("url") or job_data.get("result_url")
                                         if result_url:
-                                            print(f"✅ Face swap completed successfully")
+                                            print(f"✅ Face swap polling completed")
                                             break
-                                        else:
-                                            print(f"⚠️ Face swap marked complete but no result URL")
-                                            continue
-                                    
                                     elif job_status == "failed":
-                                        # Face swap failed
-                                        error_message = job_data.get("error_msg", "Face swap job failed")
-                                        print(f"❌ Face swap failed: {error_message}")
-                                        raise HTTPException(status_code=500, detail=f"Face swap failed: {error_message}")
-                                    
-                                    else:
-                                        print(f"⚠️ Unknown job status: {job_status}")
-                                        continue
-                                        
-                                else:
-                                    print(f"  - API Error: {status_data.get('msg', 'Unknown error')}")
-                                    continue
-                                    
-                            else:
-                                print(f"  - Received non-200 status on poll: {status_response.status_code}")
-                                if attempt == len(polling_intervals) - 1:
-                                    raise HTTPException(status_code=500, detail="Face swap polling failed")
-                                continue
+                                        raise HTTPException(status_code=500, detail="Face swap failed")
+                                    # Continue polling for other statuses
                                 
-                        except httpx.TimeoutException:
-                            print(f"  - Polling request timed out")
-                            if attempt == len(polling_intervals) - 1:
-                                raise HTTPException(status_code=500, detail="Face swap polling timed out")
-                            continue
+                    except Exception as poll_error:
+                        print(f"  - Polling error: {poll_error}")
+                        if attempt == max_attempts - 1:
+                            raise HTTPException(status_code=500, detail="Face swap polling failed")
                 
-                # If we exit the loop without getting a result, job timed out
                 if not result_url:
-                    print(f"⏰ TIMEOUT: Face swap job timed out after 5 minutes")
-                    print(f"💡 Consider implementing fallback sample image for better user experience")
-                    raise HTTPException(status_code=500, detail="Face swap job timed out - please try again later")
+                    raise HTTPException(status_code=500, detail="Face swap timed out")
         
         # Handle result URL
         
@@ -1876,6 +1849,9 @@ async def generate_scenario_content_simple(user_id: int, user_image_url: str, vo
             """Generate face swap and save immediately"""
             try:
                 log_progress(f"FACESWAP_{scenario_key.upper()}", "Starting generation", "INFO")
+                print(f"🔍 DEBUG: About to call generate_faceswap_image for {scenario_key}")
+                print(f"  - User Image: {user_image_url}")
+                print(f"  - Base Image: {config['base_image']}")
                 
                 # Add timeout protection for face swap generation
                 faceswap_result = await asyncio.wait_for(
@@ -1907,6 +1883,10 @@ async def generate_scenario_content_simple(user_id: int, user_image_url: str, vo
                 return scenario_key, None, config
             except Exception as e:
                 log_progress(f"FACESWAP_{scenario_key.upper()}", f"Failed: {str(e)}", "ERROR")
+                print(f"🚨 CRITICAL ERROR in generate_faceswap_with_save({scenario_key}): {e}")
+                print(f"  - Error type: {type(e).__name__}")
+                import traceback
+                print(f"  - Traceback: {traceback.format_exc()}")
                 return scenario_key, None, config
                 
         async def generate_talking_photo_with_save(scenario_key: str, faceswap_url: str, config: dict):
