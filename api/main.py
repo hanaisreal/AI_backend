@@ -1669,19 +1669,21 @@ async def analyze_face(request: dict):
                             "content": [
                                 {
                                     "type": "text",
-                                    "text": """Analyze this person for caricature creation. Be concise but specific.
+                                    "text": """Analyze this person for age-appropriate caricature creation. Be detailed and specific.
 
 Format response as:
-- Gender: [Male/Female] 
-- Face: [Shape, jawline, cheeks]
-- Eyes: [Size, shape, color, brows]
-- Nose: [Size, shape, bridge]
-- Mouth: [Lip size, width, smile]
-- Hair: [Color, style, length]
-- Key Feature 1: [Most distinctive trait]
-- Key Feature 2: [Second distinctive trait]
+- Age Range: [Child/Teen/Young Adult/Adult/Middle-aged/Senior]
+- Gender: [Male/Female]
+- Face Shape: [Round/Oval/Square/Heart/Diamond/Long] with [prominent/soft/angular] features
+- Facial Structure: [Strong/Delicate/Rounded/Sharp] jawline, [full/hollow/pronounced] cheeks
+- Eyes: [Large/Medium/Small], [round/almond/hooded/upturned], [dark/light] colored, [thick/thin/arched] eyebrows
+- Nose: [Small/Medium/Large/Wide/Narrow], [straight/curved/upturned] bridge, [pointed/rounded/broad] tip
+- Mouth: [Full/Thin/Medium] lips, [wide/narrow] smile, [prominent/subtle] teeth when smiling
+- Hair: [Black/Brown/Blonde/Gray/Silver] [straight/wavy/curly], [short/medium/long], [thick/fine] texture
+- Distinctive Features: [Most unique characteristic - could be dimples, freckles, smile lines, etc.]
+- Age Indicators: [Laugh lines, eye wrinkles, skin texture, hair characteristics that indicate maturity]
 
-Keep each point under 15 words. Focus on what makes this face unique for caricature art."""
+Focus on capturing authentic age-appropriate features and distinguishing characteristics."""
                                 },
                                 {
                                     "type": "image_url",
@@ -1701,18 +1703,26 @@ Keep each point under 15 words. Focus on what makes this face unique for caricat
                 print("-"*80)
 
                 # Create educational description for caricature generation
-                educational_description = f"""Educational caricature features based on uploaded image analysis:
+                # Enhanced processing of OpenAI Vision response for better feature extraction
+                enhanced_description = f"""Detailed facial analysis for age-appropriate caricature:
 
 {visual_description}
 
-This analysis will be used to create a stylized colorful caricature suitable for educational purposes about AI-generated content."""
+Additional notes for authentic representation:
+- Preserve natural age characteristics and maturity level
+- Maintain authentic Korean facial features and proportions  
+- Respect individual distinctive characteristics
+- Avoid over-stylization that changes perceived age
+
+This analysis captures specific features for creating an educational caricature that accurately represents the person's appearance and age."""
                 
                 return {
                     "facialFeatures": {
-                        "description": educational_description,
-                        "analysis_type": "educational_artistic_interpretation",
+                        "description": enhanced_description,
+                        "analysis_type": "ai_vision_enhanced",
                         "suitable_for_caricature": True,
-                        "educational_purpose": True
+                        "educational_purpose": True,
+                        "detailed_analysis": True
                     }
                 }
                 
@@ -1723,15 +1733,39 @@ This analysis will be used to create a stylized colorful caricature suitable for
                 # Fall back to educational mock analysis
                 pass
         
-        # Fallback: Create concise mock analysis for caricature generation
-        educational_mock_description = """- Gender: Female
-- Face: Oval shape, soft jawline, balanced cheeks
-- Eyes: Medium almond-shaped, brown, arched brows
-- Nose: Straight bridge, rounded tip, proportional
-- Mouth: Medium lips, gentle smile, balanced width
-- Hair: Brown wavy, shoulder-length, natural part
-- Key Feature 1: Warm friendly expression
-- Key Feature 2: Balanced harmonious features"""
+        # Fallback: Create varied mock analysis for different demographics
+        import random
+        
+        # Create more varied and realistic descriptions
+        age_ranges = ["Young Adult", "Adult", "Middle-aged"]
+        genders = ["Male", "Female"]
+        face_shapes = ["Oval", "Round", "Square", "Heart-shaped"]
+        
+        selected_age = random.choice(age_ranges)
+        selected_gender = random.choice(genders)
+        selected_face_shape = random.choice(face_shapes)
+        
+        # Age-appropriate features
+        if selected_age == "Young Adult":
+            age_indicators = "Youthful skin, clear complexion, full facial volume"
+            hair_options = ["Dark brown straight, medium length", "Black wavy, shoulder-length"]
+        elif selected_age == "Adult":
+            age_indicators = "Mature facial structure, natural adult proportions, slight laugh lines"
+            hair_options = ["Dark brown with subtle highlights", "Black straight, professional cut"]
+        else:  # Middle-aged
+            age_indicators = "Distinguished features, natural laugh lines, mature bone structure"
+            hair_options = ["Dark brown with gray touches", "Black with silver streaks"]
+        
+        educational_mock_description = f"""- Age Range: {selected_age}
+- Gender: {selected_gender}
+- Face Shape: {selected_face_shape} with naturally proportioned features
+- Facial Structure: Well-defined jawline, naturally contoured cheeks
+- Eyes: Medium to large almond-shaped, dark brown colored, naturally shaped eyebrows
+- Nose: Proportional Korean nose, straight bridge, refined tip
+- Mouth: Natural lip fullness, warm expression, balanced proportions
+- Hair: {random.choice(hair_options)}, healthy texture
+- Distinctive Features: Authentic Korean facial characteristics, expressive eyes
+- Age Indicators: {age_indicators}"""
         
         return {
             "facialFeatures": {
@@ -1763,16 +1797,32 @@ async def generate_caricature_with_dalle3(features_description: str, prompt_deta
         print(f"  - Features Received:\n{features_description}")
         print("-"*80)
         
-        # Create optimized DALL-E 3 prompt for Korean users
-        caricature_prompt = f"""Professional caricature portrait of a Korean person based on:
+        # Create age-appropriate DALL-E 3 prompt with detailed features
+        caricature_prompt = f"""Professional age-appropriate caricature portrait based on these specific features:
 {features_description}
 
-Style: Modern cartoon caricature, Disney-Pixar inspired, full color with vibrant natural skin tones, clean lines
-Background: Pure white (#FFFFFF), no shadows or objects
-Composition: Head, neck, and shoulders included, single person, centered frame
-Ethnicity: Korean facial features and characteristics
-Technical: 85mm lens, studio lighting, high quality
-Requirements: Respectful exaggeration of key features, friendly expression, gender-appropriate styling, include visible neck area
+Style Requirements:
+- Modern artistic caricature with realistic proportions
+- Age-appropriate representation (maintain actual age indicators like mature facial structure, natural skin texture)
+- Warm, friendly expression with authentic Korean features
+- Full color with natural, realistic skin tones
+- Clean, professional illustration style (NOT childlike or overly cartoonish)
+- Subtle feature enhancement that respects the person's actual age and maturity
+
+Technical Specifications:
+- Head, neck, and shoulders composition
+- Pure white background (#FFFFFF)
+- Studio lighting, professional quality
+- Centered single person frame
+- High detail on facial features mentioned above
+
+Character Requirements:
+- Maintain age-appropriate facial structure and proportions
+- Preserve distinctive features mentioned in the analysis
+- Korean ethnicity with authentic facial characteristics
+- Gender-appropriate styling and presentation
+- Natural, mature expression befitting the stated age range
+
 {prompt_details if prompt_details else ''}"""
         
         print("\n" + "-"*80)
