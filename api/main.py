@@ -138,6 +138,9 @@ AWS_REGION = os.getenv("AWS_REGION")
 CLOUDFRONT_DOMAIN = os.getenv("CLOUDFRONT_DOMAIN", "d3srmxrzq4dz1v.cloudfront.net")  # CDN domain
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
+print(f"🔍 ElevenLabs API Key loaded: {'Yes' if ELEVENLABS_API_KEY else 'No'}")
+if ELEVENLABS_API_KEY:
+    print(f"🔍 API Key starts with: {ELEVENLABS_API_KEY[:10]}...")
 AKOOL_CLIENT_ID = os.getenv("AKOOL_CLIENT_ID")
 AKOOL_CLIENT_SECRET = os.getenv("AKOOL_CLIENT_SECRET")
 AKOOL_API_KEY = os.getenv("AKOOL_API_KEY")  # Keep for backward compatibility
@@ -368,6 +371,100 @@ async def health_check():
         "version": "2.0.0"
     }
 
+@app.get("/api/debug/elevenlabs-info")
+async def debug_elevenlabs_info():
+    """Debug endpoint to check ElevenLabs subscription and capabilities"""
+    try:
+        if not elevenlabs_client:
+            return {"error": "ElevenLabs client not initialized"}
+        
+        # Try different methods to get user info
+        user_info = None
+        error_messages = []
+        
+        # Method 1: Try user.get_subscription()
+        try:
+            subscription_info = elevenlabs_client.user.get_subscription()
+            user_info = {"subscription": subscription_info}
+        except Exception as e:
+            error_messages.append(f"get_subscription failed: {e}")
+        
+        # Method 2: Try voices.get_all() to test API access
+        try:
+            voices = elevenlabs_client.voices.get_all()
+            voice_count = len(voices.voices) if hasattr(voices, 'voices') else len(voices)
+        except Exception as e:
+            voice_count = f"Error: {e}"
+            error_messages.append(f"get_voices failed: {e}")
+        
+        # Method 3: Try to get user info another way
+        try:
+            user_data = elevenlabs_client.user.get()
+            user_info = user_data
+        except Exception as e:
+            error_messages.append(f"user.get failed: {e}")
+        
+        return {
+            "api_key_loaded": bool(ELEVENLABS_API_KEY),
+            "api_key_prefix": ELEVENLABS_API_KEY[:10] + "..." if ELEVENLABS_API_KEY else None,
+            "client_available": bool(elevenlabs_client),
+            "available_voices": voice_count,
+            "user_info": user_info,
+            "error_messages": error_messages,
+            "client_methods": [method for method in dir(elevenlabs_client) if not method.startswith('_')]
+        }
+    except Exception as e:
+        return {"error": f"Failed to get ElevenLabs info: {str(e)}"}
+
+@app.get("/api/debug/test-voice-clone")
+async def test_voice_clone():
+    """Test voice cloning with a minimal example"""
+    try:
+        if not elevenlabs_client:
+            return {"error": "ElevenLabs client not initialized"}
+        
+        # Try to create a voice clone with minimal data
+        # Note: This won't actually work without a real audio file, but it will show us the exact error
+        test_result = {"status": "attempting voice clone..."}
+        
+        # Check what voice cloning methods are available
+        ivc_available = hasattr(elevenlabs_client.voices, 'ivc')
+        
+        if not ivc_available:
+            return {"error": "IVC method not available on voices client"}
+        
+        # Try to access the voice cloning API to see what happens
+        try:
+            # This should fail gracefully and show us the error format
+            clone_result = elevenlabs_client.voices.ivc.create(
+                name="TestVoice", 
+                description="Test voice clone",
+                files=[]  # Empty files to trigger an error and see the response format
+            )
+            return {"unexpected_success": str(clone_result)}
+        except Exception as clone_error:
+            # Also try to get more info about the user's current usage
+            try:
+                user_data = elevenlabs_client.user.get()
+                usage_info = {
+                    "character_count": getattr(user_data, 'character_count', 'Unknown'),
+                    "voice_slots_used": getattr(user_data.subscription if hasattr(user_data, 'subscription') else None, 'voice_slots_used', 'Unknown'),
+                    "can_use_ivc": getattr(user_data.subscription if hasattr(user_data, 'subscription') else None, 'can_use_instant_voice_cloning', 'Unknown')
+                }
+            except:
+                usage_info = {"error": "Could not get usage info"}
+                
+            return {
+                "expected_error": str(clone_error),
+                "error_type": type(clone_error).__name__,
+                "has_ivc_method": True,
+                "ivc_methods": dir(elevenlabs_client.voices.ivc),
+                "current_usage": usage_info
+            }
+            
+    except Exception as e:
+        return {"error": f"Test failed: {str(e)}"}
+
 # Progress tracking endpoints
 @app.get("/api/progress/{task_id}")
 async def get_progress(task_id: str):
@@ -450,6 +547,58 @@ async def trigger_scenario_generation_manual(user_id: int):
     except Exception as e:
         print(f"❌ Error triggering scenario generation: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to trigger scenario generation: {str(e)}")
+
+@app.post("/api/start-voice-generation")
+async def start_voice_generation(request: dict):
+    """Start voice dub generation separately - trigger at second next button in deepfake introduction"""
+    try:
+        voice_id = request.get("voiceId")
+        if not voice_id:
+            raise HTTPException(status_code=400, detail="voiceId is required")
+        
+        if not supabase_available or not supabase_service:
+            print("⚠️ Supabase not available - skipping voice generation")
+            return {"message": "Voice generation skipped - database not available", "status": "skipped"}
+        
+        # Get user by voice_id
+        user = supabase_service.get_user_by_voice_id(voice_id)
+        if not user:
+            raise HTTPException(status_code=404, detail=f"User not found with voice_id: {voice_id}")
+        
+        user_id = user['id']
+        user_name = user.get('name', 'User')
+        
+        # Check if voice dubs already exist
+        existing_investment = user.get('investment_call_audio_url')
+        existing_accident = user.get('accident_call_audio_url')
+        
+        if existing_investment and existing_accident:
+            print(f"🛑 Voice generation already COMPLETED for user {user_id}")
+            return {
+                "message": f"Voice generation already completed for user {user_id}",
+                "status": "already_completed"
+            }
+        
+        print("🎵 VOICE GENERATION TRIGGER CALLED - Second Next Button")
+        print(f"   - User ID: {user_id}")
+        print(f"   - Voice ID: {voice_id}")
+        print(f"   - User Name: {user_name}")
+        print("🎤 Starting background voice generation task...")
+        
+        # Start voice generation in background
+        asyncio.create_task(generate_voice_dubs_only(user_id, user_name, voice_id))
+        
+        return {
+            "message": f"Voice generation started for user {user_id}",
+            "status": "started",
+            "user_data": {
+                "name": user_name
+            }
+        }
+    
+    except Exception as e:
+        print(f"❌ Error triggering voice generation: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to trigger voice generation: {str(e)}")
 
 @app.post("/api/start-scenario-generation")
 async def start_scenario_generation(request: dict):
@@ -859,21 +1008,52 @@ async def complete_onboarding(
         if not elevenlabs_client:
             raise HTTPException(status_code=500, detail="ElevenLabs client not initialized")
         
+        # Debug: Test API key by getting user info
+        try:
+            user_info = elevenlabs_client.user.get()
+            print(f"🔍 ElevenLabs user info:")
+            print(f"   - Subscription: {getattr(user_info, 'subscription', 'Unknown')}")
+            print(f"   - Character count: {getattr(user_info, 'character_count', 'Unknown')}")
+            print(f"   - Character limit: {getattr(user_info, 'character_limit', 'Unknown')}")
+            print(f"   - Can use instant voice cloning: {getattr(user_info, 'can_use_instant_voice_cloning', 'Unknown')}")
+        except Exception as user_info_error:
+            print(f"⚠️ Could not get user info: {user_info_error}")
+            # Try alternative method
+            try:
+                subscription_info = elevenlabs_client.user.get_subscription()
+                print(f"🔍 ElevenLabs subscription info: {subscription_info}")
+            except Exception as sub_error:
+                print(f"⚠️ Could not get subscription info: {sub_error}")
+        
         # Reset file pointer for voice cloning
         voice.file.seek(0)
-        voice_clone_result = elevenlabs_client.voices.ivc.create(
-            name=f"UserClonedVoice_{uuid.uuid4().hex[:6]}",
-            description="Voice cloned from user recording for AI awareness education.",
-            files=[voice.file],
-        )
         
-        voice_id = getattr(voice_clone_result, 'voice_id', None) or getattr(voice_clone_result, 'id', None)
-        voice_name = getattr(voice_clone_result, 'name', None) or f"UserClonedVoice_{uuid.uuid4().hex[:6]}"
+        # Debug: Check file size and type
+        print(f"🔍 Voice file debug:")
+        print(f"   - Filename: {voice.filename}")
+        print(f"   - Content-Type: {voice.content_type}")
+        print(f"   - File size: {len(await voice.read())} bytes")
+        voice.file.seek(0)  # Reset after reading for size
         
-        if not voice_id:
-            raise HTTPException(status_code=500, detail="Failed to get voice ID from ElevenLabs")
-        
-        print(f"✅ Voice cloned: {voice_id} ({voice_name})")
+        try:
+            voice_clone_result = elevenlabs_client.voices.ivc.create(
+                name=f"UserClonedVoice_{uuid.uuid4().hex[:6]}",
+                description="Voice cloned from user recording for AI awareness education.",
+                files=[voice.file],
+            )
+            
+            voice_id = getattr(voice_clone_result, 'voice_id', None) or getattr(voice_clone_result, 'id', None)
+            voice_name = getattr(voice_clone_result, 'name', None) or f"UserClonedVoice_{uuid.uuid4().hex[:6]}"
+            
+            if not voice_id:
+                raise HTTPException(status_code=500, detail="Failed to get voice ID from ElevenLabs")
+            
+            print(f"✅ Voice cloned: {voice_id} ({voice_name})")
+            
+        except Exception as voice_error:
+            print(f"❌ Voice cloning failed with error: {voice_error}")
+            print(f"❌ Error type: {type(voice_error).__name__}")
+            raise HTTPException(status_code=500, detail=f"Voice cloning failed: {str(voice_error)}")
         
         # Step 3: Create complete user record in Supabase
         print(f"\n💾 STEP 3: Creating user record with all data")
@@ -974,12 +1154,12 @@ async def generate_narration(request: dict):
 
 @app.post("/api/generate-voice-dub")
 async def generate_voice_dub(request: dict):
-    """Generate voice dubbing using ElevenLabs Dubbing API with user's cloned voice"""
+    """Generate voice dubbing using ElevenLabs Speech-to-Speech API with user's cloned voice"""
     audio_url = request.get("audioUrl", "")
     voice_id = request.get("voiceId", "")
     scenario_type = request.get("scenarioType", "")
     
-    print(f"\n🎙️ STARTING: Generate Voice Dubbing")
+    print(f"\n🎙️ STARTING: Generate Voice Dubbing (Speech-to-Speech)")
     print(f"  - Audio URL: {audio_url}")
     print(f"  - Voice ID: {voice_id}")
     print(f"  - Scenario Type: {scenario_type}")
@@ -1007,7 +1187,8 @@ async def generate_voice_dub(request: dict):
         
         print(f"  - Downloaded audio size: {len(audio_content)} bytes")
         
-        print(f"🔄 STEP 2: Creating dubbing with ElevenLabs")
+        print(f"🔄 STEP 2: Converting voice using Speech-to-Speech API")
+        print(f"  - Target Voice ID: {voice_id}")
         print(f"  - Audio URL extension: {audio_url.split('.')[-1]}")
         
         # Create a BytesIO object from the audio content
@@ -1025,82 +1206,46 @@ async def generate_voice_dub(request: dict):
         print(f"  - Audio data size: {len(audio_content)} bytes")
         
         try:
-            # Start dubbing - dub to Korean using user's voice
-            dubbed = elevenlabs_client.dubbing.create(
-                file=audio_data,
-                target_lang="ko",  # Korean
-                source_lang="ko",  # Source is also Korean
-                num_speakers=1,    # Single speaker
-                watermark=False,   # No watermark
-                drop_background_audio=True  # Clean audio for better quality
+            # Use Speech-to-Speech API to convert audio with user's cloned voice
+            converted_audio = elevenlabs_client.speech_to_speech.convert(
+                voice_id=voice_id,  # User's cloned voice ID
+                audio=audio_data,   # Original audio content
+                model_id="eleven_multilingual_sts_v2",  # Multilingual model for Korean
+                output_format="mp3_44100_128"  # High quality MP3 output
             )
-        except Exception as dubbing_error:
-            print(f"❌ ElevenLabs dubbing failed: {dubbing_error}")
+            
+            print(f"✅ Speech-to-Speech conversion completed successfully!")
+            
+        except Exception as conversion_error:
+            print(f"❌ ElevenLabs Speech-to-Speech failed: {conversion_error}")
             raise HTTPException(
                 status_code=400, 
-                detail=f"ElevenLabs dubbing API error: {str(dubbing_error)}"
+                detail=f"ElevenLabs Speech-to-Speech API error: {str(conversion_error)}"
             )
         
-        print(f"  - Dubbing started with ID: {dubbed.dubbing_id}")
-        print(f"  - Expected duration: {dubbed.expected_duration_sec} seconds")
+        print(f"🔄 STEP 3: Processing converted audio")
         
-        print(f"🔄 STEP 3: Polling for dubbing completion")
+        # Convert audio generator to bytes if needed
+        if hasattr(converted_audio, '__iter__') and not isinstance(converted_audio, (bytes, bytearray)):
+            # If it's a generator, collect all bytes
+            converted_audio_bytes = b"".join(converted_audio)
+        else:
+            # If it's already bytes
+            converted_audio_bytes = converted_audio
         
-        # Optimized polling based on expected duration
-        expected_duration = max(dubbed.expected_duration_sec, 10)  # At least 10 seconds
-        initial_wait = min(expected_duration * 0.8, 30)  # Wait 80% of expected time, max 30s
+        # Convert to base64 for frontend
+        import base64
+        audio_base64 = base64.b64encode(converted_audio_bytes).decode('utf-8')
         
-        print(f"  - Expected duration: {expected_duration}s, initial wait: {initial_wait}s")
+        print(f"✅ Voice dubbing completed successfully!")
+        print(f"  - Converted audio size: {len(converted_audio_bytes)} bytes")
+        print(f"  - Using user's cloned voice: {voice_id}")
         
-        # Initial wait before first poll
-        await asyncio.sleep(initial_wait)
-        
-        # Then poll with increasing intervals
-        max_attempts = 20  # Reduced from 60
-        for attempt in range(max_attempts):
-            if attempt > 0:
-                # Progressive intervals: 5s, 10s, 15s, then 15s
-                interval = min(5 + (attempt * 5), 15)
-                await asyncio.sleep(interval)
-            
-            # Only log every few attempts to reduce noise
-            if attempt % 3 == 0 or attempt < 3:
-                print(f"  - Polling attempt {attempt + 1}/{max_attempts}")
-            
-            status_response = elevenlabs_client.dubbing.get(dubbed.dubbing_id)
-            
-            # Only log status changes or every few attempts
-            if attempt % 3 == 0 or attempt < 3:
-                print(f"  - Status: {status_response.status}")
-            
-            if status_response.status == "dubbed":
-                print(f"✅ STEP 4: Dubbing completed! Retrieving audio")
-                
-                # Get the dubbed audio file (this returns a generator)
-                dubbed_audio_generator = elevenlabs_client.dubbing.audio.get(dubbed.dubbing_id, "ko")
-                
-                # Collect all bytes from the generator
-                dubbed_audio = b"".join(dubbed_audio_generator)
-                
-                # Convert to base64 for frontend
-                audio_base64 = base64.b64encode(dubbed_audio).decode('utf-8')
-                
-                print(f"✅ Voice dubbing completed successfully!")
-                print(f"  - Dubbed audio size: {len(dubbed_audio)} bytes")
-                
-                return {
-                    "audioData": audio_base64,
-                    "audioType": "audio/mpeg",
-                    "dubbingId": dubbed.dubbing_id
-                }
-            
-            elif status_response.status == "failed":
-                print(f"❌ ERROR: Dubbing failed")
-                raise HTTPException(status_code=500, detail="Voice dubbing failed")
-        
-        # If we reach here, dubbing timed out
-        print(f"❌ ERROR: Dubbing timed out after 5 minutes")
-        raise HTTPException(status_code=504, detail="Voice dubbing timed out")
+        return {
+            "audioData": audio_base64,
+            "audioType": "audio/mpeg",
+            "dubbingId": f"sts_{scenario_type}_{voice_id[:8]}"  # Generate unique ID for tracking
+        }
         
     except Exception as e:
         print(f"❌ Error generating voice dub: {e}")
@@ -2043,11 +2188,8 @@ async def generate_scenario_content_simple(user_id: int, user_image_url: str, vo
             }
         }
         
-        # Voice dub configurations  
-        voice_dubs = {
-            'investment_call_audio': 'https://d3srmxrzq4dz1v.cloudfront.net/video-url/voice1.mp3',
-            'accident_call_audio': 'https://d3srmxrzq4dz1v.cloudfront.net/video-url/voice2.mp3'
-        }
+        # Voice dubs are now generated separately via /api/start-voice-generation
+        # This function now only handles video generation (face swaps + talking photos)
         
         generated_urls = {}
         generation_errors = []
@@ -2138,7 +2280,7 @@ async def generate_scenario_content_simple(user_id: int, user_image_url: str, vo
                 return scenario_key, None
                 
         async def generate_voice_dub_with_save(dub_key: str, source_url: str):
-            """Generate voice dub and save immediately"""
+            """Generate voice dub using Speech-to-Speech API and save immediately"""
             try:
                 log_progress(f"AUDIO_{dub_key.upper()}", "Starting voice dubbing", "INFO")
                 
@@ -2256,10 +2398,7 @@ async def generate_scenario_content_simple(user_id: int, user_image_url: str, vo
             task = generate_talking_photo_with_save(scenario_key, faceswap_url, config)
             concurrent_tasks.append(('talking_photo', task))
         
-        # Add voice dub tasks (independent of face swaps)
-        for dub_key, source_url in voice_dubs.items():
-            task = generate_voice_dub_with_save(dub_key, source_url)
-            concurrent_tasks.append(('voice_dub', task))
+        # Voice dub tasks removed - now handled separately by /api/start-voice-generation
         
         # Execute all tasks concurrently
         if concurrent_tasks:
@@ -2339,6 +2478,107 @@ async def generate_scenario_content_simple(user_id: int, user_image_url: str, vo
             log_progress("ERROR_STATUS", "Database updated with fatal error", "SAVE")
         except Exception as db_error:
             log_progress("ERROR_STATUS", f"Could not update database: {db_error}", "ERROR")
+
+async def generate_voice_dubs_only(user_id: int, user_name: str, voice_id: str):
+    """Generate only voice dubs (separated from video generation for parallel processing)"""
+    try:
+        print(f"🎤 STARTING VOICE-ONLY GENERATION for user {user_id}")
+        print(f"   - User: {user_name}")
+        print(f"   - Voice ID: {voice_id}")
+        
+        voice_sources = {
+            'investment_call_audio': 'https://d3srmxrzq4dz1v.cloudfront.net/video-url/voice1.mp3',
+            'accident_call_audio': 'https://d3srmxrzq4dz1v.cloudfront.net/video-url/voice2.mp3'
+        }
+        
+        generated_voice_content = {}
+        
+        for dub_key, source_url in voice_sources.items():
+            print(f"🔄 Generating {dub_key}...")
+            try:
+                # Add timeout protection for voice dub generation
+                voice_result = await asyncio.wait_for(
+                    generate_voice_dub({
+                        "audioUrl": source_url,
+                        "voiceId": voice_id,
+                        "scenarioType": dub_key.replace('_audio', '')
+                    }),
+                    timeout=360  # 6 minutes timeout for voice dub
+                )
+                
+                if voice_result and voice_result.get('audioData'):
+                    # Upload voice dub to S3 and get CDN URL
+                    try:
+                        import base64
+                        from io import BytesIO
+                        import time
+                        import uuid
+                        
+                        # Decode base64 audio data
+                        audio_bytes = base64.b64decode(voice_result['audioData'])
+                        
+                        # Create unique filename
+                        timestamp = int(time.time())
+                        safe_user_name = user_name.replace(' ', '_')[:20] if user_name else "user"
+                        audio_filename = f"voice_dub_{dub_key}_{safe_user_name}_{timestamp}_{uuid.uuid4().hex[:6]}.mp3"
+                        audio_object_name = f"voice_dubs/{safe_user_name}/{audio_filename}"
+                        
+                        # Upload to S3
+                        audio_file = BytesIO(audio_bytes)
+                        audio_file.name = audio_filename
+                        
+                        s3_client.upload_fileobj(
+                            audio_file, S3_BUCKET_NAME, audio_object_name,
+                            ExtraArgs={
+                                'ACL': 'public-read',
+                                'ContentType': 'audio/mpeg',
+                                'CacheControl': 'max-age=31536000'
+                            }
+                        )
+                        
+                        # Use CloudFront CDN URL
+                        cdn_url = f"https://{CLOUDFRONT_DOMAIN}/{audio_object_name}"
+                        generated_voice_content[dub_key + '_url'] = cdn_url
+                        print(f"✅ {dub_key} completed - uploaded to CDN: {cdn_url}")
+                        
+                        # Save individual voice dub immediately
+                        try:
+                            partial_update = {f'{dub_key}_url': cdn_url}
+                            supabase_service.update_user(user_id, partial_update)
+                            print(f"✅ {dub_key} URL saved to database")
+                        except Exception as save_error:
+                            print(f"⚠️ DB save warning for {dub_key}: {save_error}")
+                        
+                    except Exception as upload_error:
+                        print(f"⚠️ S3 upload failed for {dub_key}: {upload_error}")
+                        # Fallback to base64 data URL
+                        audio_data_url = f"data:audio/mpeg;base64,{voice_result['audioData']}"
+                        generated_voice_content[dub_key + '_url'] = audio_data_url
+                        print(f"✅ {dub_key} completed - using base64 fallback")
+                        
+                        # Save fallback URL
+                        try:
+                            partial_update = {f'{dub_key}_url': audio_data_url}
+                            supabase_service.update_user(user_id, partial_update)
+                            print(f"✅ {dub_key} fallback URL saved to database")
+                        except Exception as save_error:
+                            print(f"⚠️ DB save warning for {dub_key}: {save_error}")
+                else:
+                    print(f"❌ {dub_key} failed")
+                    
+            except asyncio.TimeoutError:
+                print(f"⏰ {dub_key} timed out after 6 minutes")
+            except Exception as voice_error:
+                print(f"❌ {dub_key} error: {voice_error}")
+        
+        print(f"🎤 VOICE GENERATION COMPLETE: Generated {len(generated_voice_content)} voice dubs")
+        return generated_voice_content
+        
+    except Exception as e:
+        print(f"🚨 VOICE GENERATION FAILED: {type(e).__name__}: {str(e)}")
+        import traceback
+        print(f"🚨 FULL TRACEBACK: {traceback.format_exc()}")
+        return {}
 
 @app.post("/api/fix-voice-dub-permissions/{user_id}")
 async def fix_voice_dub_permissions(user_id: int):
