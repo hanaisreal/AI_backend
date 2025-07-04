@@ -988,11 +988,21 @@ async def complete_onboarding(
     print(f"  - Image: {image.filename} ({image.content_type})")
     print(f"  - Voice: {voice.filename} ({voice.content_type})")
     
-    # Validate inputs
+    # Validate inputs with iOS compatibility
     if not image.content_type.startswith('image/'):
         raise HTTPException(status_code=400, detail="Image file must be an image")
-    if not voice.content_type.startswith('audio/'):
-        raise HTTPException(status_code=400, detail="Voice file must be an audio file")
+    
+    # iOS-friendly audio validation - iOS Safari might send different content types
+    valid_audio_types = ['audio/', 'video/mp4', 'video/quicktime', 'application/octet-stream']
+    is_valid_audio = any(voice.content_type.startswith(audio_type) for audio_type in valid_audio_types)
+    
+    # Additional filename-based validation for iOS
+    if not is_valid_audio and voice.filename:
+        audio_extensions = ['.wav', '.mp3', '.m4a', '.webm', '.ogg', '.aac']
+        is_valid_audio = any(voice.filename.lower().endswith(ext) for ext in audio_extensions)
+    
+    if not is_valid_audio:
+        raise HTTPException(status_code=400, detail=f"Voice file must be an audio file. Received: {voice.content_type}, filename: {voice.filename}")
     
     try:
         # Step 1: Upload image to S3
@@ -1035,25 +1045,169 @@ async def complete_onboarding(
         print(f"   - File size: {len(await voice.read())} bytes")
         voice.file.seek(0)  # Reset after reading for size
         
-        try:
-            voice_clone_result = elevenlabs_client.voices.ivc.create(
-                name=f"UserClonedVoice_{uuid.uuid4().hex[:6]}",
-                description="Voice cloned from user recording for AI awareness education.",
-                files=[voice.file],
-            )
+        # Additional debugging for iOS compatibility
+        print(f"🔍 ElevenLabs compatibility check:")
+        print(f"   - Is iOS format: {voice.content_type in ['video/mp4', 'video/quicktime', 'audio/mp4', 'audio/m4a']}")
+        print(f"   - Is standard audio: {voice.content_type.startswith('audio/')}")
+        print(f"   - File extension: {voice.filename.split('.')[-1] if voice.filename and '.' in voice.filename else 'none'}")
+        
+        # Convert audio to ElevenLabs-compatible format if needed
+        audio_data = await voice.read()
+        voice.file.seek(0)
+        
+        # Multi-format retry system for ElevenLabs compatibility
+        def create_audio_variants(audio_data: bytes, original_content_type: str, original_filename: str):
+            """Create multiple audio format variants to try with ElevenLabs"""
+            import io
+            import tempfile
+            import subprocess
+            import os
             
-            voice_id = getattr(voice_clone_result, 'voice_id', None) or getattr(voice_clone_result, 'id', None)
-            voice_name = getattr(voice_clone_result, 'name', None) or f"UserClonedVoice_{uuid.uuid4().hex[:6]}"
+            variants = []
             
-            if not voice_id:
-                raise HTTPException(status_code=500, detail="Failed to get voice ID from ElevenLabs")
+            # 1. Try original format first
+            original_file = io.BytesIO(audio_data)
+            if original_filename:
+                original_file.name = original_filename
+            elif original_content_type == 'audio/mp4' or original_content_type == 'video/mp4':
+                original_file.name = 'audio.m4a'
+            elif original_content_type == 'audio/webm':
+                original_file.name = 'audio.webm'
+            else:
+                original_file.name = 'audio.wav'
             
-            print(f"✅ Voice cloned: {voice_id} ({voice_name})")
+            variants.append(('Original', original_file, original_content_type))
             
-        except Exception as voice_error:
-            print(f"❌ Voice cloning failed with error: {voice_error}")
-            print(f"❌ Error type: {type(voice_error).__name__}")
-            raise HTTPException(status_code=500, detail=f"Voice cloning failed: {str(voice_error)}")
+            # 2. Try as WAV format (just rename, many formats work)
+            try:
+                wav_file = io.BytesIO(audio_data)
+                wav_file.name = 'audio.wav'
+                variants.append(('WAV-renamed', wav_file, 'audio/wav'))
+            except Exception as e:
+                print(f"⚠️ WAV rename failed: {e}")
+            
+            # 3. Try as MP3 format (just rename)
+            try:
+                mp3_file = io.BytesIO(audio_data)
+                mp3_file.name = 'audio.mp3'
+                variants.append(('MP3-renamed', mp3_file, 'audio/mp3'))
+            except Exception as e:
+                print(f"⚠️ MP3 rename failed: {e}")
+            
+            # 4. Advanced conversion with ffmpeg (if available)
+            try:
+                # Check if ffmpeg is available
+                subprocess.run(['ffmpeg', '-version'], capture_output=True, timeout=5)
+                
+                # Convert to WAV using ffmpeg
+                with tempfile.NamedTemporaryFile(delete=False) as temp_input:
+                    temp_input.write(audio_data)
+                    temp_input_path = temp_input.name
+                
+                with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_wav:
+                    temp_wav_path = temp_wav.name
+                
+                result = subprocess.run([
+                    'ffmpeg', '-i', temp_input_path,
+                    '-ar', '44100',  # 44.1kHz
+                    '-ac', '1',      # Mono
+                    '-c:a', 'pcm_s16le',  # 16-bit PCM
+                    '-f', 'wav',
+                    temp_wav_path
+                ], capture_output=True, text=True, timeout=30)
+                
+                if result.returncode == 0:
+                    with open(temp_wav_path, 'rb') as f:
+                        wav_data = f.read()
+                    wav_converted_file = io.BytesIO(wav_data)
+                    wav_converted_file.name = 'audio_converted.wav'
+                    variants.append(('WAV-converted', wav_converted_file, 'audio/wav'))
+                
+                # Clean up
+                os.unlink(temp_input_path)
+                os.unlink(temp_wav_path)
+                
+            except (FileNotFoundError, subprocess.TimeoutExpired, Exception) as e:
+                print(f"⚠️ FFmpeg WAV conversion not available: {e}")
+            
+            # 5. Try MP3 conversion with ffmpeg (if available)
+            try:
+                with tempfile.NamedTemporaryFile(delete=False) as temp_input:
+                    temp_input.write(audio_data)
+                    temp_input_path = temp_input.name
+                
+                with tempfile.NamedTemporaryFile(suffix='.mp3', delete=False) as temp_mp3:
+                    temp_mp3_path = temp_mp3.name
+                
+                result = subprocess.run([
+                    'ffmpeg', '-i', temp_input_path,
+                    '-ar', '44100',
+                    '-ac', '1',
+                    '-b:a', '192k',  # 192kbps as recommended by ElevenLabs
+                    '-f', 'mp3',
+                    temp_mp3_path
+                ], capture_output=True, text=True, timeout=30)
+                
+                if result.returncode == 0:
+                    with open(temp_mp3_path, 'rb') as f:
+                        mp3_data = f.read()
+                    mp3_converted_file = io.BytesIO(mp3_data)
+                    mp3_converted_file.name = 'audio_converted.mp3'
+                    variants.append(('MP3-converted', mp3_converted_file, 'audio/mp3'))
+                
+                # Clean up
+                os.unlink(temp_input_path)
+                os.unlink(temp_mp3_path)
+                
+            except (FileNotFoundError, subprocess.TimeoutExpired, Exception) as e:
+                print(f"⚠️ FFmpeg MP3 conversion not available: {e}")
+            
+            return variants
+        
+        # Create audio format variants
+        print(f"🔄 Creating multiple audio format variants for ElevenLabs compatibility")
+        audio_variants = create_audio_variants(audio_data, voice.content_type, voice.filename)
+        
+        print(f"📋 Available audio format variants: {[f'{name} ({content_type})' for name, _, content_type in audio_variants]}")
+        
+        # Try each audio format variant until one works
+        voice_id = None
+        voice_name = None
+        last_error = None
+        
+        for format_name, audio_file, content_type in audio_variants:
+            try:
+                print(f"🎯 Trying ElevenLabs voice cloning with {format_name} format ({content_type})")
+                audio_file.seek(0)  # Reset file pointer
+                
+                voice_clone_result = elevenlabs_client.voices.ivc.create(
+                    name=f"UserClonedVoice_{uuid.uuid4().hex[:6]}",
+                    description="Voice cloned from user recording for AI awareness education.",
+                    files=[audio_file],
+                )
+                
+                voice_id = getattr(voice_clone_result, 'voice_id', None) or getattr(voice_clone_result, 'id', None)
+                voice_name = getattr(voice_clone_result, 'name', None) or f"UserClonedVoice_{uuid.uuid4().hex[:6]}"
+                
+                if voice_id:
+                    print(f"✅ Voice cloning SUCCESS with {format_name} format!")
+                    print(f"✅ Voice ID: {voice_id} ({voice_name})")
+                    break
+                else:
+                    print(f"⚠️ {format_name} format: No voice ID returned")
+                    continue
+                    
+            except Exception as format_error:
+                print(f"❌ {format_name} format failed: {format_error}")
+                print(f"❌ Error type: {type(format_error).__name__}")
+                last_error = format_error
+                continue
+        
+        # If all formats failed, raise the last error
+        if not voice_id:
+            error_msg = f"Voice cloning failed with all audio formats. Last error: {str(last_error)}"
+            print(f"❌ FINAL FAILURE: {error_msg}")
+            raise HTTPException(status_code=500, detail=error_msg)
         
         # Step 3: Create complete user record in Supabase
         print(f"\n💾 STEP 3: Creating user record with all data")
