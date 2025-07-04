@@ -989,8 +989,17 @@ async def complete_onboarding(
     print(f"  - Voice: {voice.filename} ({voice.content_type})")
     
     # Validate inputs with iOS compatibility
-    if not image.content_type.startswith('image/'):
-        raise HTTPException(status_code=400, detail="Image file must be an image")
+    # iOS-friendly image validation - iOS Safari might send different content types
+    valid_image_types = ['image/', 'application/octet-stream']
+    is_valid_image = any(image.content_type.startswith(img_type) for img_type in valid_image_types)
+    
+    # Additional filename-based validation for iOS images
+    if not is_valid_image and image.filename:
+        image_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.heic', '.heif']
+        is_valid_image = any(image.filename.lower().endswith(ext) for ext in image_extensions)
+    
+    if not is_valid_image:
+        raise HTTPException(status_code=400, detail=f"Image file must be an image. Received: {image.content_type}, filename: {image.filename}")
     
     # iOS-friendly audio validation - iOS Safari might send different content types
     valid_audio_types = ['audio/', 'video/mp4', 'video/quicktime', 'application/octet-stream']
@@ -1003,6 +1012,32 @@ async def complete_onboarding(
     
     if not is_valid_audio:
         raise HTTPException(status_code=400, detail=f"Voice file must be an audio file. Received: {voice.content_type}, filename: {voice.filename}")
+    
+    # Check file sizes - iOS has different limits
+    MAX_IMAGE_SIZE = 50 * 1024 * 1024  # 50MB for images (iOS can send large HEIC files)
+    MAX_AUDIO_SIZE = 100 * 1024 * 1024  # 100MB for audio (iOS recordings can be large)
+    
+    image_size = len(await image.read())
+    image.file.seek(0)  # Reset file pointer
+    
+    audio_size = len(await voice.read()) 
+    voice.file.seek(0)  # Reset file pointer
+    
+    print(f"🔍 File size check:")
+    print(f"   - Image: {image_size / (1024*1024):.2f} MB (max: {MAX_IMAGE_SIZE / (1024*1024):.0f} MB)")
+    print(f"   - Audio: {audio_size / (1024*1024):.2f} MB (max: {MAX_AUDIO_SIZE / (1024*1024):.0f} MB)")
+    
+    if image_size > MAX_IMAGE_SIZE:
+        raise HTTPException(status_code=400, detail=f"Image file too large: {image_size / (1024*1024):.1f}MB. Maximum: {MAX_IMAGE_SIZE / (1024*1024):.0f}MB")
+    
+    if audio_size > MAX_AUDIO_SIZE:
+        raise HTTPException(status_code=400, detail=f"Audio file too large: {audio_size / (1024*1024):.1f}MB. Maximum: {MAX_AUDIO_SIZE / (1024*1024):.0f}MB")
+    
+    if image_size < 1024:  # Less than 1KB is suspicious
+        raise HTTPException(status_code=400, detail="Image file appears to be corrupted or empty")
+    
+    if audio_size < 1024:  # Less than 1KB is suspicious  
+        raise HTTPException(status_code=400, detail="Audio file appears to be corrupted or empty")
     
     try:
         # Step 1: Upload image to S3
