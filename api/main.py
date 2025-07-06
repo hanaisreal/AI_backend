@@ -1976,20 +1976,10 @@ async def generate_talking_photo(request: dict):
 
 @app.post("/api/analyze-face")
 async def analyze_face(request: dict):
-    """Analyze image for artistic elements to create educational caricature"""
+    """Analyze image for artistic elements to create zepeto style cartoon avatar"""
     image_url = request.get("imageUrl", "")
-    
-    print("\n" + "="*80)
-    print("🔬 STARTING: Analyze Face for Caricature")
-    print(f"  - Image URL: {image_url}")
-    print("="*80)
 
-    try:
-        # For educational purposes about AI-generated content, we'll create a 
-        # general artistic description suitable for caricature generation
-        # This avoids OpenAI's facial recognition restrictions while still
-        # demonstrating AI capabilities for educational purposes
-        
+    try:        
         if openai_client:
             try:
                 print("\n" + "-"*80)
@@ -2003,21 +1993,20 @@ async def analyze_face(request: dict):
                             "content": [
                                 {
                                     "type": "text",
-                                    "text": """Analyze this person for age-appropriate caricature creation. Be detailed and specific.
+                                    "text": """Analyze this Korean person's facial features for cartoon character creation. Use this exact format without bold text, introductions, or extra explanations:
 
-Format response as:
-- Age Range: [Child/Teen/Young Adult/Adult/Middle-aged/Senior]
-- Gender: [Male/Female]
-- Face Shape: [Round/Oval/Square/Heart/Diamond/Long] with [prominent/soft/angular] features
-- Facial Structure: [Strong/Delicate/Rounded/Sharp] jawline, [full/hollow/pronounced] cheeks
-- Eyes: [Large/Medium/Small], [round/almond/hooded/upturned], [dark/light] colored, [thick/thin/arched] eyebrows
-- Nose: [Small/Medium/Large/Wide/Narrow], [straight/curved/upturned] bridge, [pointed/rounded/broad] tip
-- Mouth: [Full/Thin/Medium] lips, [wide/narrow] smile, [prominent/subtle] teeth when smiling
-- Hair: [Black/Brown/Blonde/Gray/Silver] [straight/wavy/curly], [short/medium/long], [thick/fine] texture
-- Distinctive Features: [Most unique characteristic - could be dimples, freckles, smile lines, etc.]
-- Age Indicators: [Laugh lines, eye wrinkles, skin texture, hair characteristics that indicate maturity]
+BASIC INFO: Age range, gender, Korean ethnicity
+FACE STRUCTURE: Face shape, jawline definition, cheekbone prominence, forehead size
+EYES: Shape, size, color, eyelash thickness, eyebrow details, eye spacing
+NOSE: Shape, size, bridge height, tip shape
+MOUTH: Lip fullness, shape, smile width, mouth size
+HAIR: Color, texture, length(ear-cut, pixie-cut, shoulder-length), style, hairline, volume
+GLASSES: Frame details if present, or "None"
+FACIAL HAIR: Type and coverage if present, or "Clean shaven"
+SKIN: Tone, texture, complexion
+DISTINCTIVE FEATURES: Unique characteristics, memorable traits
 
-Focus on capturing authentic age-appropriate features and distinguishing characteristics."""
+Output only the analysis in plain text format."""
                                 },
                                 {
                                     "type": "image_url",
@@ -2026,7 +2015,7 @@ Focus on capturing authentic age-appropriate features and distinguishing charact
                             ]
                         }
                     ],
-                    max_tokens=500
+                    max_tokens=250
                 )
                 
                 visual_description = response.choices[0].message.content
@@ -2036,23 +2025,9 @@ Focus on capturing authentic age-appropriate features and distinguishing charact
                 print(f"  - Analysis Result:\n{visual_description}")
                 print("-"*80)
 
-                # Create educational description for caricature generation
-                # Enhanced processing of OpenAI Vision response for better feature extraction
-                enhanced_description = f"""Detailed facial analysis for age-appropriate caricature:
-
-{visual_description}
-
-Additional notes for authentic representation:
-- Preserve natural age characteristics and maturity level
-- Maintain authentic Korean facial features and proportions  
-- Respect individual distinctive characteristics
-- Avoid over-stylization that changes perceived age
-
-This analysis captures specific features for creating an educational caricature that accurately represents the person's appearance and age."""
-                
                 return {
                     "facialFeatures": {
-                        "description": enhanced_description,
+                        "description": visual_description,
                         "analysis_type": "ai_vision_enhanced",
                         "suitable_for_caricature": True,
                         "educational_purpose": True,
@@ -2079,27 +2054,58 @@ This analysis captures specific features for creating an educational caricature 
         selected_gender = random.choice(genders)
         selected_face_shape = random.choice(face_shapes)
         
-        # Age-appropriate features
-        if selected_age == "Young Adult":
-            age_indicators = "Youthful skin, clear complexion, full facial volume"
-            hair_options = ["Dark brown straight, medium length", "Black wavy, shoulder-length"]
-        elif selected_age == "Adult":
-            age_indicators = "Mature facial structure, natural adult proportions, slight laugh lines"
-            hair_options = ["Dark brown with subtle highlights", "Black straight, professional cut"]
-        else:  # Middle-aged
-            age_indicators = "Distinguished features, natural laugh lines, mature bone structure"
-            hair_options = ["Dark brown with gray touches", "Black with silver streaks"]
+        # Comprehensive hair style variations for detailed character analysis
+        hair_options = [
+            "Short black hair, ear-length with natural texture",
+            "Curly brown hair, shoulder-length with volume",
+            "Straight dark hair, chin-length bob cut",
+            "Wavy salt-and-pepper hair, short and layered",
+            "Black hair with natural curl, cropped close to head",
+            "Medium brown hair, side-swept with gentle waves",
+            "Short silver hair, neatly styled with side part",
+            "Dark hair with loose curls, just above shoulders",
+            "Straight black hair, pixie cut style",
+            "Wavy brown hair, ear-length with natural bounce",
+            "Salt-and-pepper hair, thinning on top, shorter on sides",
+            "Curly dark hair, medium length with natural texture"
+        ]
+        glasses_options = [
+            "None", 
+            "Black rectangular frames with medium thickness", 
+            "Round gold-rimmed glasses with thin frames", 
+            "Brown tortoiseshell frames with clear lenses",
+            "Modern silver frames with blue light coating"
+        ]
+        facial_hair_options = [
+            "Clean shaven", 
+            "Light stubble with 5 o'clock shadow", 
+            "Well-groomed goatee with matching mustache", 
+            "Short beard with neat trimming",
+            "Mustache only, well-maintained"
+        ]
+        eye_options = [
+            "Deep brown, almond-shaped with natural sparkle",
+            "Dark brown, slightly hooded with thick lashes",
+            "Medium brown, round shape with expressive quality",
+            "Black, narrow almond shape with strong presence"
+        ]
+        nose_options = [
+            "Straight bridge, proportional size, refined tip",
+            "Slightly elevated bridge, medium width, soft tip",
+            "Well-defined bridge, narrow profile, pointed tip",
+            "Gentle slope, wider base, rounded tip"
+        ]
         
-        educational_mock_description = f"""- Age Range: {selected_age}
-- Gender: {selected_gender}
-- Face Shape: {selected_face_shape} with naturally proportioned features
-- Facial Structure: Well-defined jawline, naturally contoured cheeks
-- Eyes: Medium to large almond-shaped, dark brown colored, naturally shaped eyebrows
-- Nose: Proportional Korean nose, straight bridge, refined tip
-- Mouth: Natural lip fullness, warm expression, balanced proportions
-- Hair: {random.choice(hair_options)}, healthy texture
-- Distinctive Features: Authentic Korean facial characteristics, expressive eyes
-- Age Indicators: {age_indicators}"""
+        educational_mock_description = f"""BASIC INFO: {selected_age}, {selected_gender}, Korean ethnicity
+FACE STRUCTURE: {selected_face_shape} face, defined jawline, moderate cheekbones, proportional forehead
+EYES: {random.choice(eye_options)}, arched eyebrows, well-spaced
+NOSE: {random.choice(nose_options)}
+MOUTH: Medium-full lips, natural curve, warm smile
+HAIR: {random.choice(hair_options)}, healthy hairline
+GLASSES: {random.choice(glasses_options)}
+FACIAL HAIR: {random.choice(facial_hair_options)}
+SKIN: Warm undertone, smooth texture, flawless complexion
+DISTINCTIVE FEATURES: Expressive eyes, friendly demeanor, youthful appearance"""
         
         return {
             "facialFeatures": {
@@ -2120,10 +2126,7 @@ This analysis captures specific features for creating an educational caricature 
 # Removed broken Responses API function - using DALL-E 3 directly
 
 async def generate_caricature_with_dalle3(features_description: str, prompt_details: str, task_id: str = None) -> str:
-    """Generate personalized caricature using DALL-E 3 with detailed features"""
-    print("\n" + "="*80)
-    print("🎨 STARTING: Generate Caricature with DALL-E 3")
-    print("="*80)
+
 
     try:
         print("\n" + "-"*80)
@@ -2131,31 +2134,36 @@ async def generate_caricature_with_dalle3(features_description: str, prompt_deta
         print(f"  - Features Received:\n{features_description}")
         print("-"*80)
         
-        # Create age-appropriate DALL-E 3 prompt with detailed features
-        caricature_prompt = f"""Professional age-appropriate caricature portrait based on these specific features:
+        # Create stylized cartoon character prompt in Zepeto/Mario style
+        caricature_prompt = f"""3D cartoon character in Zepeto Korean mobile app style on PLAIN WHITE BACKGROUND.
+
+MANDATORY FACIAL FEATURES - COPY EXACTLY:
 {features_description}
 
-Style Requirements:
-- Modern artistic caricature with realistic proportions
-- Age-appropriate representation (maintain actual age indicators like mature facial structure, natural skin texture)
-- Warm, friendly expression with authentic Korean features
-- Full color with natural, realistic skin tones
-- Clean, professional illustration style (NOT childlike or overly cartoonish)
-- Subtle feature enhancement that respects the person's actual age and maturity
+HAIR STYLE REQUIREMENTS (CRITICAL):
+- If description says "ear-length" hair, make hair END AT THE EARS
+- If description says "pixie-cut" hair, make hair VERY SHORT close to head
+- If description says "shoulder-length" hair, make hair END AT THE SHOULDERS
+- If description says "chin-length" hair, make hair END AT THE CHIN
+- HAIR LENGTH IS MANDATORY - DO NOT IGNORE
 
-Technical Specifications:
-- Head, neck, and shoulders composition
-- Pure white background (#FFFFFF)
-- Studio lighting, professional quality
-- Centered single person frame
-- High detail on facial features mentioned above
+FACE REQUIREMENTS (CRITICAL):
+- Copy the EXACT eye shape, size, and color from description
+- Copy the EXACT nose shape and size from description  
+- Copy the EXACT mouth and lip shape from description
+- If glasses are mentioned, MUST include glasses with exact frame style
+- Show the EXACT age specified (mature features if 50s+)
 
-Character Requirements:
-- Maintain age-appropriate facial structure and proportions
-- Preserve distinctive features mentioned in the analysis
-- Korean ethnicity with authentic facial characteristics
-- Gender-appropriate styling and presentation
-- Natural, mature expression befitting the stated age range
+BACKGROUND: SOLID WHITE BACKGROUND ONLY - NO OTHER COLORS OR PATTERNS
+
+STYLE: 3D cartoon, Zepeto Korean mobile aesthetic, cel-shading, bright colors, front-facing portrait head to shoulders.
+
+ZEPETO AESTHETIC REQUIREMENTS:
+- Smooth, flawless cartoon skin
+- Glossy, polished 3D cartoon finish
+- Clean, simplified features
+
+COMPLIANCE REQUIRED: The character must look exactly like the description or the image is rejected.
 
 {prompt_details if prompt_details else ''}"""
         
@@ -2170,7 +2178,7 @@ Character Requirements:
             prompt=caricature_prompt,
             size="1024x1024",
             quality="hd",  # Use HD quality for better facial detail
-            style="natural",  # Natural style for better realistic caricatures
+            style="vivid",  # Vivid style for better cartoon characters
             n=1,
         )
         
