@@ -2159,8 +2159,7 @@ BACKGROUND: SOLID WHITE BACKGROUND ONLY - NO OTHER COLORS OR PATTERNS
 STYLE: 3D cartoon, Zepeto Korean mobile aesthetic, cel-shading, bright colors, front-facing portrait head to shoulders.
 
 ZEPETO AESTHETIC REQUIREMENTS:
-- Smooth, flawless cartoon skin
-- Glossy, polished 3D cartoon finish
+- Polished 3D cartoon finish
 - Clean, simplified features
 
 COMPLIANCE REQUIRED: The character must look exactly like the description or the image is rejected.
