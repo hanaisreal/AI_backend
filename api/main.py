@@ -2136,8 +2136,6 @@ async def generate_caricature_with_dalle3(features_description: str, prompt_deta
         
         # Create stylized cartoon character prompt in Zepeto/Mario style
         caricature_prompt = f"""60 years old Korean3D cartoon character in Zepeto Korean mobile app style on PLAIN WHITE BACKGROUND.
-
-        - The character must be above 60 years old.
 MANDATORY FACIAL FEATURES - COPY EXACTLY:
 {features_description}
 
@@ -2149,7 +2147,7 @@ HAIR STYLE REQUIREMENTS (CRITICAL):
 - HAIR LENGTH IS MANDATORY - DO NOT IGNORE
 
 FACE REQUIREMENTS (CRITICAL):
-- Copy the EXACT eye shape, size, and color from description
+- Copy the EXACT eye shape, size, and color from description, no exaggeration
 - Copy the EXACT nose shape and size from description  
 - Copy the EXACT mouth and lip shape from description
 - If glasses are mentioned, MUST include glasses with exact frame style
@@ -2159,10 +2157,7 @@ BACKGROUND: SOLID WHITE BACKGROUND ONLY - NO OTHER COLORS OR PATTERNS
 
 STYLE: 3D cartoon, Zepeto Korean mobile aesthetic, cel-shading, bright colors, front-facing portrait head to shoulders.
 
-ZEPETO AESTHETIC REQUIREMENTS:
-- Polished 3D cartoon finish
-- Clean, simplified features
-
+- The character must be above 60 years old.
 COMPLIANCE REQUIRED: The character must look exactly like the description or the image is rejected.
 
 {prompt_details if prompt_details else ''}"""
