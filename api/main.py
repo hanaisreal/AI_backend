@@ -2387,6 +2387,32 @@ async def generate_scenario_content_simple(user_id: int, user_image_url: str, vo
         generation_errors = []
         
         # Helper functions for concurrent execution with partial saves
+        async def handle_lottery_fallback(scenario_key: str, config: dict):
+            """Handle lottery scenario fallback by using sample video URLs"""
+            log_progress(f"FACESWAP_{scenario_key.upper()}", "Using sample video fallback", "INFO")
+            
+            # Determine gender from config base_image URL for proper sample video
+            is_female = 'female' in config['base_image'].lower()
+            
+            if is_female:
+                sample_video_url = "https://d3srmxrzq4dz1v.cloudfront.net/talking_photos/user/talking_photo_user_1752632375_100397.mp4"
+            else:
+                sample_video_url = "https://d3srmxrzq4dz1v.cloudfront.net/talking_photos/user/talking_photo_user_1752755401_feb5f6.mp4"
+            
+            # Save sample video URL directly (skip face swap)
+            try:
+                partial_update = {
+                    f'{scenario_key}_faceswap_url': None,  # Mark as skipped
+                    f'{scenario_key}_video_url': sample_video_url  # Use sample video directly
+                }
+                supabase_service.update_user(user_id, partial_update)
+                log_progress(f"FACESWAP_{scenario_key.upper()}", f"Sample video saved: {sample_video_url}", "SAVE")
+            except Exception as save_error:
+                log_progress(f"FACESWAP_{scenario_key.upper()}", f"Sample video save failed: {save_error}", "ERROR")
+            
+            # Return special marker to indicate video was handled
+            return scenario_key, "SAMPLE_VIDEO_USED", config
+
         async def generate_faceswap_with_save(scenario_key: str, config: dict):
             """Generate face swap and save immediately"""
             try:
@@ -2422,6 +2448,9 @@ async def generate_scenario_content_simple(user_id: int, user_image_url: str, vo
                     
             except asyncio.TimeoutError:
                 log_progress(f"FACESWAP_{scenario_key.upper()}", "Timeout after 5 minutes", "ERROR")
+                # Handle lottery scenario fallback
+                if scenario_key == 'lottery':
+                    return await handle_lottery_fallback(scenario_key, config)
                 return scenario_key, None, config
             except Exception as e:
                 log_progress(f"FACESWAP_{scenario_key.upper()}", f"Failed: {str(e)}", "ERROR")
@@ -2429,6 +2458,9 @@ async def generate_scenario_content_simple(user_id: int, user_image_url: str, vo
                 print(f"  - Error type: {type(e).__name__}")
                 import traceback
                 print(f"  - Traceback: {traceback.format_exc()}")
+                # Handle lottery scenario fallback
+                if scenario_key == 'lottery':
+                    return await handle_lottery_fallback(scenario_key, config)
                 return scenario_key, None, config
                 
         async def generate_talking_photo_with_save(scenario_key: str, faceswap_url: str, config: dict):
@@ -2572,7 +2604,11 @@ async def generate_scenario_content_simple(user_id: int, user_image_url: str, vo
                 log_progress("PHASE_1", f"Exception caught: {result}", "ERROR")
             elif result and len(result) == 3:
                 scenario_key, faceswap_url, config = result
-                if faceswap_url:
+                if faceswap_url == "SAMPLE_VIDEO_USED":
+                    # Special case: Sample video was used directly, video URL already saved
+                    log_progress(f"PHASE_1", f"{scenario_key} used sample video directly - skipping talking photo generation", "INFO")
+                    generated_urls[f'{scenario_key}_video_url'] = "ALREADY_SAVED"  # Mark as completed
+                elif faceswap_url:
                     successful_faceswaps.append((scenario_key, faceswap_url, config))
                     generated_urls[f'{scenario_key}_faceswap_url'] = faceswap_url
                 else:
@@ -2585,7 +2621,7 @@ async def generate_scenario_content_simple(user_id: int, user_image_url: str, vo
         # Phase 2: Generate talking photos and voice dubs concurrently
         concurrent_tasks = []
         
-        # Add talking photo tasks (using successful face swaps)
+        # Add talking photo tasks (only for successful face swaps that need video generation)
         for scenario_key, faceswap_url, config in successful_faceswaps:
             task = generate_talking_photo_with_save(scenario_key, faceswap_url, config)
             concurrent_tasks.append(('talking_photo', task))
